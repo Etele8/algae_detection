@@ -1,6 +1,7 @@
 *.png
 yolo-venv/
 Yolo/combined_dataset/runs/
+számolás/
 
 # Byte-compiled / optimized / DLL files
 __pycache__/
