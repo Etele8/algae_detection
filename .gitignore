@@ -1,6 +1,6 @@
 *.png
 yolo-venv/
-Yolo/combined_dataset/runs/
+Yolo/runs/
 számolás/
 
 # Byte-compiled / optimized / DLL files
