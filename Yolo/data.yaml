@@ -1,14 +1,5 @@
-path: D:\intezet\Bogi\Yolo\combined_dataset
-train: ./images/train
-val: ./images/val
-test: ./images/test
+train: path/to/train/images
+val: path/to/val/images
 
-names:
-  0: EUK
-  1: FE
-  2: FC
-  3: EUK colony
-  4: FE colony
-  5: FC colony
-original_dir: original
-enhanced_dir: red
+nc: 6
+names: ["EUK", "FC", "FE", "EUK colony", "FC colony", "FE colony"]
