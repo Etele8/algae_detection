@@ -2,6 +2,7 @@
 yolo-venv/
 Yolo/runs/
 számolás/
+Yolo/data
 
 # Byte-compiled / optimized / DLL files
 __pycache__/
