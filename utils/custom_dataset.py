@@ -3,6 +3,8 @@ import torch
 from torch.utils.data import Dataset
 from torchvision import transforms
 from PIL import Image
+import cv2
+
 
 class YOLO6ChannelDataset(Dataset):
     def __init__(self, left_img_dir, right_img_dir, label_dir, img_size=(640, 640)):
@@ -25,26 +27,18 @@ class YOLO6ChannelDataset(Dataset):
         return len(self.files)
 
     def load_yolo_labels(self, label_path):
-        """
-        Load YOLO-format labels and scale to absolute pixel coordinates.
-        """
-        boxes = []
+        labels = []
         if not os.path.exists(label_path):
-            return torch.zeros((0, 5))  # No targets
-
+            return torch.zeros((0, 5))
         with open(label_path, 'r') as f:
             for line in f:
                 parts = line.strip().split()
                 if len(parts) != 5:
                     continue
-                class_id, x, y, w, h = map(float, parts)
-                x1 = (x - w / 2) * self.img_size[0]
-                y1 = (y - h / 2) * self.img_size[1]
-                x2 = (x + w / 2) * self.img_size[0]
-                y2 = (y + h / 2) * self.img_size[1]
-                boxes.append([class_id, x1, y1, x2, y2])
-
-        return torch.tensor(boxes, dtype=torch.float32)
+                class_id, x_center, y_center, w, h = map(float, parts)
+                # These are already normalized (0-1), keep as is
+                labels.append([class_id, x_center, y_center, w, h])
+        return torch.tensor(labels, dtype=torch.float32)
 
     def __getitem__(self, idx):
         # print(f"[Debug] Loading item {idx}")
@@ -66,6 +60,5 @@ class YOLO6ChannelDataset(Dataset):
         # Load labels
         label_path = os.path.join(self.label_dir, filename.replace(".png", ".txt"))
         targets = self.load_yolo_labels(label_path)
-        # print(f"[Debug] Loaded targets for {filename}: {targets}")
 
         return img_6ch, targets

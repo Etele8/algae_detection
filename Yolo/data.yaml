@@ -1,5 +1,6 @@
-train: path/to/train/images
-val: path/to/val/images
+train: D:\intezet\Bogi\Yolo\data\images\train\right
+val: D:\intezet\Bogi\Yolo\data\images\val\right
 
 nc: 6
-names: ["EUK", "FC", "FE", "EUK colony", "FC colony", "FE colony"]
+
+names: [ "EUK", "FC", "FE", "EUK colony", "FC colony", "FE colony"]
