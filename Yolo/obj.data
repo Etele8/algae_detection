@@ -1,4 +1,0 @@
-classes = 6
-train = combined_dataset/train.txt
-names = combined_dataset/obj.names
-backup = backup/
