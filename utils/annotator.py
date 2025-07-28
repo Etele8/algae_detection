@@ -1,6 +1,14 @@
 import os
 import glob
 
+"""Creating annotated.txt file from the names of the images in the labels folder"""
+label_dir = "D:/intezet/Bogi/Yolo/data_rcnn/labels"
+annotated_file_path = "D:/intezet/Bogi/data/annotated.txt"
+
+with open(annotated_file_path, "w") as annotated_file:
+    for label_file in glob.glob(os.path.join(label_dir, "*.txt")):
+        image_file_name = os.path.basename(label_file).replace("_og.txt", "")
+        annotated_file.write(image_file_name + "\n")
 
 """Getting the names form annotated.txt, moving those from the merged folder to annotated folder"""
 

@@ -1,8 +1,5 @@
 from ultralytics import YOLO
 
-# Load your custom model
-model = YOLO("Yolo/runs/detect/train/weights/bestv8_better.pt")  # Replace with your actual model path
 
-
-# Run prediction on an image
-results = model("Yolo/data/test_for_prediction", save=True) 
+model = YOLO("D:/intezet/Bogi/Yolo/runs/detect/weights/bestv8m_1024.pt")
+results = model("D:/intezet/Bogi/Yolo/test", save=True, imgsz=1024, iou=0.5, conf=0.1)

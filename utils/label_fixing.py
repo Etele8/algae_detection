@@ -1,15 +1,16 @@
 import os
 
-# Paths
-label_dir = "D:/intezet/Bogi/Yolo/data/labels_old/val"  # change if needed
-output_dir = "D:/intezet/Bogi/Yolo/data/labels/val"  # where to save updated labels
-os.makedirs(output_dir, exist_ok=True)
+
+"""Double the x and w values in YOLO format labels in a specified folder and save them in place"""
+
+label_dir = "D:/intezet/Bogi/Yolo/data_rcnn/labels"
+os.makedirs(label_dir, exist_ok=True)
 
 for fname in os.listdir(label_dir):
-    if not fname.endswith(".txt"):
+    if not fname.endswith("_combined.txt"):
         continue
     src = os.path.join(label_dir, fname)
-    dst = os.path.join(output_dir, fname)
+    dst = os.path.join(label_dir, fname)
 
     with open(src, "r") as f:
         lines = f.readlines()
