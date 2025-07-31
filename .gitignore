@@ -1,5 +1,6 @@
 *.txt
 *.png
+*.jpg
 *.zip
 yolo-venv/
 Yolo/runs/
