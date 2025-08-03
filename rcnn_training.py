@@ -56,7 +56,7 @@ class PicoAlgaeDataset(Dataset):
                         x2 = (cx + bw / 2) * w
                         y2 = (cy + bh / 2) * h
                         boxes.append([x1, y1, x2, y2])
-                        labels.append(int(cls))
+                        labels.append(int(cls) + 1)
 
             if boxes:
                 boxes = torch.tensor(boxes, dtype=torch.float32)
@@ -74,6 +74,11 @@ class PicoAlgaeDataset(Dataset):
 
     def __getitem__(self, idx):
         return self.samples[idx]
+    # def __getitem__(self, idx):
+    #     image, target = self.samples[idx]
+    #     print("labels in sample:", target["labels"].tolist())
+    #     return image, target
+
 
 # ---------------------------
 # Model
@@ -171,7 +176,7 @@ def main():
     model = get_faster_rcnn_model(num_classes=num_classes, image_size=(3150, 3150), backbone='resnet50')
     device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
 
-    train(model, dataloader, device, num_epochs=10, lr=1e-4)
+    train(model, dataloader, device, num_epochs=8, lr=1e-4)
 
 if __name__ == "__main__":
     main()
