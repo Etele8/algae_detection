@@ -20,7 +20,7 @@ DATA = ROOT / "data"
 MERGED_PATH = DATA / "merged"
 ANNOTATED_FOLDER = DATA / "annotated"
 COLLECTED_IMAGES = DATA / "collected_images"
-RCNN_PATH = DATA / "data_rcnn"
+RCNN_PATH = DATA / "r-cnn"
 RCNN_TRAINING_IMAGES = RCNN_PATH / "images"
 RCNN_LABELS = RCNN_PATH / "labels"
 
@@ -112,6 +112,13 @@ def remove_empty_labels_and_images():
             print(f"Removed empty label {label.name}")
 
 
+def rename():
+    """Rename .png image files without the _red ing file name to *_og.png."""
+    for path in COLLECTED_IMAGES.glob("*.png"):
+        if "_red" not in path.name:
+            new_name = path.name.replace(".png", "_og.png")
+            path.rename(path.parent / new_name)
+
 def run_pipeline():
     annotated_names = get_annotated_names()
     move_annotated_images(annotated_names)
@@ -119,6 +126,7 @@ def run_pipeline():
     rename_combined_to_og()
     copy_annotated_images(annotated_names)
     remove_empty_labels_and_images()
+    # rename()
 
 
 if __name__ == "__main__":
