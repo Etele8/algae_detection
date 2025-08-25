@@ -424,7 +424,7 @@ class CachedPicoAlgaeDataset(Dataset):
 # Model (6-channel conv1)
 # =========================
 def get_faster_rcnn_model(num_classes=7, image_size=(1024, 1024), backbone='resnet101') -> FasterRCNN:
-    backbone_fpn = resnet_fpn_backbone(backbone_name=backbone, weights="DEFAULT")  # training from scratch (or load later)
+    backbone_fpn = resnet_fpn_backbone(backbone_name=backbone, weights="DEFAULT", returned_layers=[1, 2, 3, 4])  # training from scratch (or load later)
     old_conv = backbone_fpn.body.conv1
     new_conv = torch.nn.Conv2d(6, old_conv.out_channels, kernel_size=7, stride=2, padding=3, bias=False)
 
@@ -442,19 +442,22 @@ def get_faster_rcnn_model(num_classes=7, image_size=(1024, 1024), backbone='resn
         sampling_ratio=4
     )
     
-   
+    anchor_generator = AnchorGenerator(
+        sizes=((8, 16, 32), (64,), (128,), (256,), (512,)),
+        aspect_ratios=((0.25, 0.5, 1.0, 2.0, 4.0),) * 5
+    )
 
     model = FasterRCNN(
         backbone=backbone_fpn,
         num_classes=num_classes,
-        # rpn_anchor_generator=anchor_generator,
+        rpn_anchor_generator=anchor_generator,
         box_roi_pool=roi_pooler
     )
 
     # Match training/eval transforms (no z-score here)
     model.transform = GeneralizedRCNNTransform(
-        min_size=image_size[0],
-        max_size=image_size[1],
+        min_size=[1800, 2048, 2400, 3000],
+        max_size=4096,
         image_mean=[0.0] * 6,
         image_std=[1.0] * 6,
     )
