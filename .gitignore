@@ -4,9 +4,8 @@
 *.jpg
 *.zip
 yolo-venv/
-Yolo/runs/
 számolás/
-Yolo/data/
+runs/
 
 # Byte-compiled / optimized / DLL files
 __pycache__/
