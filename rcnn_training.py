@@ -10,6 +10,9 @@ from sklearn.metrics import precision_recall_curve, average_precision_score
 import cv2
 import numpy as np
 
+import albumentations as A
+from albumentations.core.transforms_interface import ImageOnlyTransform
+
 import torch
 import torch.nn.functional as F
 from torch.utils.data import Dataset, DataLoader, random_split
@@ -57,13 +60,56 @@ class Config:
     RPN_POST_NMS_TEST: int = 1000
 
     # tensorboard
-    LOGDIR = "runs/algae"
+    LOGDIR = "runs/algae3"
     LOG_EVERY = 50          # batches
     PR_IOU = 0.1            # IoU to match detections to GT
     PR_SCORE_THRESH = 0.00  # keep all preds for PR curves
     CLASS_NAMES = ["EUK", "FC", "FE", "EUK colony", "FC colony", "FE colony"]
     
 CFG = Config()
+
+
+# ====================
+# augmentations
+# ====================
+
+# USE only for EUK classes, for others it decreases the performance
+class RedCLAHE(ImageOnlyTransform):
+    def __init__(self, clip_limit=2.0, tile_grid_size=(8,8), always_apply=False, p=0.5):
+        super().__init__(always_apply, p)
+        self.clip_limit = clip_limit
+        self.tile_grid_size = tile_grid_size
+
+    def apply(self, img, **params):
+        # img: HxWx6 float32 [0,1]
+        red = (img[..., 3:6] * 255.0).astype(np.uint8)
+        clahe = cv2.createCLAHE(clipLimit=self.clip_limit, tileGridSize=self.tile_grid_size)
+        for ch in range(3):
+            red[..., ch] = clahe.apply(red[..., ch])
+        img[..., 3:6] = red.astype(np.float32) / 255.0
+        return img
+
+
+def build_train_aug():
+    return A.Compose([
+        # --- geometric (bbox-aware) ---
+        A.HorizontalFlip(p=0.5),
+        A.VerticalFlip(p=0.2),
+        A.RandomRotate90(p=0.25),
+
+        # --- photometric (no bbox change) ---
+        A.RandomBrightnessContrast(brightness_limit=0.15, contrast_limit=0.15, p=0.30),
+        A.GaussianBlur(blur_limit=(3, 9), sigma_limit=(0.5, 1.2), p=0.20),
+        A.MotionBlur(blur_limit=(5, 9), p=0.15),
+
+        RedCLAHE(p=0.50),
+    ],
+    bbox_params=A.BboxParams(
+        format="albumentations",      # 👈 normalized xyxy in [0,1]
+        label_fields=["class_labels"],
+        min_visibility=0.30
+    ))
+
 
 
 # =========================
@@ -107,7 +153,8 @@ def log_image_embeddings_backbone(
             feats.append(f.squeeze(0).cpu())
 
             # thumbnail from OG channels only (first 3), clamp to [0,1]
-            og = img6[:3].clamp(0, 1).cpu()                  # [3,H,W]
+            og_bgr = img6[:3].clamp(0, 1).cpu()            # [3,H,W] BGR
+            og = og_bgr[[2, 1, 0], :, :]                  # [3,H,W]
             # downsample for projector thumbnails (e.g., 160x160)
             H, W = og.shape[1], og.shape[2]
             scale = 160 / max(H, W)
@@ -146,7 +193,6 @@ def log_image_embeddings_backbone(
         global_step=global_step,
     )
     writer.flush()
-    writer.close()
     print(f"[Embedding] Logged {len(metadata)} image embeddings → {tag} @ step {global_step}")
 
 
@@ -204,8 +250,9 @@ def log_roi_embeddings(
                 box_head_feats = torch.nn.functional.normalize(box_head_feats, dim=1)
 
             # thumbnails cropped from OG image for each box
-            og = img6[:3].clamp(0,1).cpu().numpy()  # [3,H,W]
-            og = np.transpose(og, (1,2,0))          # HWC for cv2/np
+            og_bgr = img6[:3].clamp(0,1).cpu().numpy()      # [3,H,W] BGR
+            og_rgb = og_bgr[[2,1,0], :, :]                  # [3,H,W] RGB
+            og = np.transpose(og_rgb, (1,2,0))
             H, W = og.shape[:2]
             for feat_vec, b, lab, sc in zip(box_head_feats.cpu(), boxes.cpu(), labels.cpu(), scores.cpu()):
                 if total >= max_rois:
@@ -316,14 +363,18 @@ import os
 
 def load_or_create_cached_fused(stem: str) -> np.ndarray:
     """
-    Returns fused (6,H,W) float32 from cache if fresh, else recomputes and caches.
-    Cache is a compressed .npz with keys: fused, imgsz, zscore, src_mtime
+    Returns fused (6, H, W) float32 from cache if fresh, else recomputes and caches.
+    - Reads <stem>_og.png and <stem>_red.png (BGR)
+    - Resizes both to (CFG.IMAGE_SIZE, CFG.IMAGE_SIZE)
+    - Optionally z-scores per image
+    - Concatenates into 6 channels (BGR + BGR)
+    - **Neutralizes the bottom-right scale-bar region** before saving
+    Cache keys: fused, imgsz, zscore, src_mtime
     """
     ogp  = CFG.IMAGE_DIR / f"{stem}_og.png"
     redp = CFG.IMAGE_DIR / f"{stem}_red.png"
     assert ogp.exists() and redp.exists(), f"Missing pair for {stem}"
 
-    # ⬇️ ensure .npz suffix to avoid ambiguity
     cache_path: Path = build_cache_name(stem).with_suffix(".npz")
     cache_path.parent.mkdir(parents=True, exist_ok=True)
 
@@ -342,26 +393,24 @@ def load_or_create_cached_fused(stem: str) -> np.ndarray:
     if cache_path.exists():
         try:
             npz = np.load(cache_path, mmap_mode="r", allow_pickle=False)
-            # Ensure it's an NPZ (has .files) and has expected keys
             if hasattr(npz, "files") and {"fused", "imgsz", "zscore", "src_mtime"} <= set(npz.files):
                 if (int(npz["imgsz"]) == CFG.IMAGE_SIZE and
                     int(npz["zscore"]) == (1 if CFG.USE_ZSCORE else 0) and
                     float(npz["src_mtime"]) >= src_mtime):
                     return npz["fused"]
-            # else: fall through to rebuild
         except Exception:
-            # corrupted/stale -> remove and rebuild
             try:
                 cache_path.unlink()
             except OSError:
                 pass
 
-    # build cache
-    og  = cv2.imread(str(ogp))  # BGR uint8
-    red = cv2.imread(str(redp))
+    # Build cache
+    og  = cv2.imread(str(ogp))   # BGR uint8
+    red = cv2.imread(str(redp))  # BGR uint8
     if og is None or red is None:
         raise FileNotFoundError(f"Read failed for {stem}")
 
+    # Resize to square (keeps your current behavior)
     og  = cv2.resize(og,  (CFG.IMAGE_SIZE, CFG.IMAGE_SIZE), interpolation=cv2.INTER_AREA).astype(np.float32) / 255.0
     red = cv2.resize(red, (CFG.IMAGE_SIZE, CFG.IMAGE_SIZE), interpolation=cv2.INTER_AREA).astype(np.float32) / 255.0
 
@@ -369,62 +418,136 @@ def load_or_create_cached_fused(stem: str) -> np.ndarray:
         og  = zscore(og)
         red = zscore(red)
 
-    # BGR+BGR → (H,W,6) → (6,H,W)
-    fused = np.concatenate([og, red], axis=-1)
-    fused = np.transpose(fused, (2, 0, 1)).astype(np.float32)
+    # BGR+BGR -> (H,W,6)
+    fused_hw6 = np.concatenate([og, red], axis=-1).astype(np.float32)
+
+    # ---- Neutralize bottom-right scale bar (percent-based window) ----
+    H = W = CFG.IMAGE_SIZE
+    BR_WIDTH  = 0.18   # rightmost 18% of width (tweak if needed)
+    BR_HEIGHT = 0.12   # bottom 12% of height (tweak if needed)
+    x0 = int(W * (1.0 - BR_WIDTH))
+    y0 = int(H * (1.0 - BR_HEIGHT))
+    x1 = W
+    y1 = H
+
+    # Fill with per-channel median to blend naturally
+    patch = fused_hw6[y0:y1, x0:x1, :]
+    if patch.size > 0:
+        fill = np.median(fused_hw6, axis=(0, 1), keepdims=True)  # global median
+        fused_hw6[y0:y1, x0:x1, :] = fill
+
+    # (H,W,6) -> (6,H,W)
+    fused = np.transpose(fused_hw6, (2, 0, 1)).astype(np.float32)
 
     _save_npz(fused)
     return fused
+
 
 
 # =========================
 # Dataset (cached fused)
 # =========================
 class CachedPicoAlgaeDataset(Dataset):
-    def __init__(self, stems: List[str]):
+    def __init__(self, stems: List[str], is_train: bool = False, aug=None):
         self.stems = list(stems)
+        self.is_train = is_train
+        self.aug = aug
 
     def __len__(self):
         return len(self.stems)
 
     def __getitem__(self, idx):
         stem = self.stems[idx]
-        fused = load_or_create_cached_fused(stem)      # (6,H,W) float32
-        image = torch.from_numpy(fused)                # torch.float32
-
-        # labels
+    
+        # (6, H, W) float32 in [0,1]
+        fused = load_or_create_cached_fused(stem)
+        img = np.transpose(fused, (1, 2, 0))  # -> (H, W, 6)
+    
+        # Load YOLO labels and convert to pixel xyxy
         lblp = CFG.LABEL_DIR / f"{stem}_og.txt"
         W = H = CFG.IMAGE_SIZE
-        boxes, labels = [], []
+        bboxes_px, class_labels = [], []
         if lblp.exists() and lblp.stat().st_size > 0:
             for ln in lblp.read_text().splitlines():
                 parts = ln.strip().split()
                 if len(parts) != 5:
                     continue
                 c, cx, cy, bw, bh = map(float, parts)
-                x1 = (cx - bw/2) * W
-                y1 = (cy - bh/2) * H
-                x2 = (cx + bw/2) * W
-                y2 = (cy + bh/2) * H
+                x1 = (cx - bw / 2.0) * W
+                y1 = (cy - bh / 2.0) * H
+                x2 = (cx + bw / 2.0) * W
+                y2 = (cy + bh / 2.0) * H
                 if x2 > x1 and y2 > y1:
-                    boxes.append([x1, y1, x2, y2])
-                    labels.append(int(c) + 1)  # 1..N (0 is background)
-        if len(boxes) == 0:
+                    bboxes_px.append([x1, y1, x2, y2])
+                    class_labels.append(int(c) + 1)  # shift: 1..N (0=background)
+    
+        # ---- Albumentations (normalized xyxy) ----
+        if self.is_train and self.aug is not None:
+            H0, W0 = img.shape[:2]
+        
+            if len(bboxes_px) > 0:
+                # normalize to [0,1]
+                bboxes_norm = []
+                kept_labels = []
+                for (x1, y1, x2, y2), lab in zip(bboxes_px, class_labels):
+                    xn1 = x1 / W0; yn1 = y1 / H0; xn2 = x2 / W0; yn2 = y2 / H0
+                    # pre‑clamp to [0,1] to satisfy Albumentations' checker
+                    xn1 = float(np.clip(xn1, 0.0, 1.0))
+                    yn1 = float(np.clip(yn1, 0.0, 1.0))
+                    xn2 = float(np.clip(xn2, 0.0, 1.0))
+                    yn2 = float(np.clip(yn2, 0.0, 1.0))
+                    if xn2 - xn1 > 0 and yn2 - yn1 > 0:
+                        bboxes_norm.append([xn1, yn1, xn2, yn2])
+                        kept_labels.append(lab)
+        
+                if len(bboxes_norm) > 0:
+                    transformed = self.aug(image=img, bboxes=bboxes_norm, class_labels=kept_labels)
+                else:
+                    # all boxes became invalid after clamp — run photometric-only
+                    transformed = self.aug(image=img, bboxes=[], class_labels=[])
+            else:
+                transformed = self.aug(image=img, bboxes=[], class_labels=[])
+        
+            img = transformed["image"]
+            bboxes_norm = transformed.get("bboxes", [])
+            class_labels = transformed.get("class_labels", [])
+        
+            # post‑clamp + de‑normalize back to pixel xyxy
+            H2, W2 = img.shape[:2]
+            bboxes_px, cleaned_labels = [], []
+            for (xn1, yn1, xn2, yn2), lab in zip(bboxes_norm, class_labels):
+                xn1 = float(np.clip(xn1, 0.0, 1.0))
+                yn1 = float(np.clip(yn1, 0.0, 1.0))
+                xn2 = float(np.clip(xn2, 0.0, 1.0))
+                yn2 = float(np.clip(yn2, 0.0, 1.0))
+                x1, y1 = xn1 * W2, yn1 * H2
+                x2, y2 = xn2 * W2, yn2 * H2
+                if x2 - x1 > 1.0 and y2 - y1 > 1.0:
+                    bboxes_px.append([x1, y1, x2, y2])
+                    cleaned_labels.append(lab)
+            class_labels = cleaned_labels
+
+    
+        # ---- to tensors ----
+        image = torch.from_numpy(np.transpose(img, (2, 0, 1))).float().contiguous()  # (6,H,W)
+        if len(bboxes_px) == 0:
             boxes_t  = torch.zeros((0, 4), dtype=torch.float32)
             labels_t = torch.zeros((0,), dtype=torch.int64)
         else:
-            boxes_t  = torch.tensor(boxes, dtype=torch.float32)
-            labels_t = torch.tensor(labels, dtype=torch.int64)
-
+            boxes_t  = torch.tensor(bboxes_px, dtype=torch.float32)
+            labels_t = torch.tensor(class_labels, dtype=torch.int64)
+    
         target = {"boxes": boxes_t, "labels": labels_t}
         return image, target
+
+
 
 
 # =========================
 # Model (6-channel conv1)
 # =========================
 def get_faster_rcnn_model(num_classes=7, image_size=(1024, 1024), backbone='resnet101') -> FasterRCNN:
-    backbone_fpn = resnet_fpn_backbone(backbone_name=backbone, weights="DEFAULT", returned_layers=[1, 2, 3, 4])  # training from scratch (or load later)
+    backbone_fpn = resnet_fpn_backbone(backbone_name=backbone, weights="DEFAULT", returned_layers=[1, 2, 3, 4])
     old_conv = backbone_fpn.body.conv1
     new_conv = torch.nn.Conv2d(6, old_conv.out_channels, kernel_size=7, stride=2, padding=3, bias=False)
 
@@ -443,8 +566,12 @@ def get_faster_rcnn_model(num_classes=7, image_size=(1024, 1024), backbone='resn
     )
     
     anchor_generator = AnchorGenerator(
-        sizes=((8, 16, 32), (64,), (128,), (256,), (512,)),
-        aspect_ratios=((0.25, 0.5, 1.0, 2.0, 4.0),) * 5
+            sizes=((8, 16, 32),      # P2
+                  (16, 32, 64),     # P3
+                  (32, 64, 128),    # P4
+                  (64, 128, 256),   # P5
+                  (128, 256, 512),),  # P6,
+            aspect_ratios=((0.25, 0.5, 1.0, 2.0, 4.0),) * 5
     )
 
     model = FasterRCNN(
@@ -456,7 +583,7 @@ def get_faster_rcnn_model(num_classes=7, image_size=(1024, 1024), backbone='resn
 
     # Match training/eval transforms (no z-score here)
     model.transform = GeneralizedRCNNTransform(
-        min_size=[1800, 2048, 2400, 3000],
+        min_size=[1800, 2048],
         max_size=4096,
         image_mean=[0.0] * 6,
         image_std=[1.0] * 6,
@@ -562,13 +689,28 @@ def evaluate_epoch(model, val_loader, writer: SummaryWriter, epoch: int,
         mAP = float(np.nanmean(aps))
         writer.add_scalar("val/mAP@0.5", mAP, epoch)
         print(f"[Val] Epoch {epoch}: mAP@0.5 = {mAP:.4f}")
+        return mAP
     else:
         print(f"[Val] Epoch {epoch}: no classes with GT found.")
+        return float("nan")
 
 
 # =========================
 # Training
 # =========================
+
+def save_checkpoint(model, optimizer, scheduler, epoch, best_map, path: Path):
+    path.parent.mkdir(parents=True, exist_ok=True)
+    torch.save({
+        "epoch": epoch,
+        "model_state": model.state_dict(),
+        "optimizer_state": optimizer.state_dict(),
+        "scheduler_state": scheduler.state_dict(),
+        "best_map": best_map,
+        "cfg": CFG.__dict__,
+    }, str(path))
+    print(f"[Checkpoint] Saved: {path}")
+
 def seed_everything(seed: int):
     random.seed(seed)
     np.random.seed(seed)
@@ -577,6 +719,7 @@ def seed_everything(seed: int):
 
 def train():
     writer = SummaryWriter(CFG.LOGDIR)
+    best_map = -float("inf")
     
     seed_everything(CFG.SEED)
     CFG.CACHE_DIR.mkdir(parents=True, exist_ok=True)
@@ -595,8 +738,9 @@ def train():
     train_stems = stems[:train_count]
     val_stems   = stems[train_count:]
 
-    train_ds = CachedPicoAlgaeDataset(train_stems)
-    val_ds   = CachedPicoAlgaeDataset(val_stems)
+    train_aug = build_train_aug()
+    train_ds = CachedPicoAlgaeDataset(train_stems, is_train=True, aug=train_aug)
+    val_ds   = CachedPicoAlgaeDataset(val_stems, is_train=False, aug=None)
 
     train_loader = DataLoader(
         train_ds, batch_size=CFG.BATCH_SIZE, shuffle=True,
@@ -607,6 +751,7 @@ def train():
         num_workers=CFG.WORKERS, pin_memory=True, collate_fn=lambda x: tuple(zip(*x))
     )
 
+    
     model = get_faster_rcnn_model(
         num_classes=CFG.NUM_CLASSES,
         image_size=(CFG.IMAGE_SIZE, CFG.IMAGE_SIZE),
@@ -668,7 +813,10 @@ def train():
         writer.add_scalar("epoch_avg/total_loss", sum(running.values()) / num_batches, epoch)
 
         # validation with PR curves and AP
-        evaluate_epoch(model, val_loader, writer, epoch, class_names=CFG.CLASS_NAMES, iou_thr=CFG.PR_IOU, score_thr=CFG.PR_SCORE_THRESH, device=CFG.DEVICE)
+        mAp = evaluate_epoch(model, val_loader, writer, epoch, class_names=CFG.CLASS_NAMES, iou_thr=CFG.PR_IOU, score_thr=CFG.PR_SCORE_THRESH, device=CFG.DEVICE)
+        if not np.isnan(mAp) and mAp > best_map:
+                best_map = mAp
+                save_checkpoint(model, optimizer, lr_scheduler, epoch, best_map, CFG.SAVE_BEST_TO)
 
     writer.flush()
     writer.close()
