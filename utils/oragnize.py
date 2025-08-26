@@ -38,7 +38,7 @@ def move_annotated_images(annotated_names):
     
     ANNOTATED_FOLDER.mkdir(exist_ok=True)
     for name in annotated_names:
-        img_name = name + "_combined.png"
+        img_name = name.replace("txt", "png")
         src = MERGED_PATH / img_name
         dst = ANNOTATED_FOLDER / img_name
         if src.exists():
