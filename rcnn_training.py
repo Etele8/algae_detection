@@ -17,7 +17,7 @@ import albumentations as A
 from albumentations.core.transforms_interface import ImageOnlyTransform
 
 import torch
-from torch.amp import autocast, grad_scaler
+from torch.amp import autocast, GradScaler
 from torch.utils.data import Dataset, DataLoader
 from torch.utils.tensorboard import SummaryWriter
 from torchvision.models.detection import FasterRCNN
@@ -55,7 +55,7 @@ class Config:
     SAVE_BEST_TO: Path = Path("best_frcnn_6ch.pth")
 
     # tensorboard
-    LOGDIR = "runs/algae5"
+    LOGDIR = "runs/algae6"
     LOG_EVERY = 50          # batches
     PR_IOU = 0.5            # IoU to match detections to GT
     PR_SCORE_THRESH = 0.00  # keep all preds for PR curves
@@ -828,7 +828,7 @@ def predict_one_with_tta(model, img6: torch.Tensor, device, min_sizes=(1600, 180
                 x = torch.flip(x, dims=[2])
             elif flip == "v":
                 x = torch.flip(x, dims=[1])
-            with autocast():
+            with autocast("cuda"):
                 out = model([x.to(device)])[0]
             b, s, l = out["boxes"].cpu(), out["scores"].cpu(), out["labels"].cpu()
             # unflip back to original coords
@@ -1101,7 +1101,7 @@ def train():
 
     train_loader = DataLoader(
         train_ds, batch_size=CFG.BATCH_SIZE, shuffle=True,
-        num_workers=CFG.WORKERS, pin_memory=True, persistent_worker=True, prefetch_factor=4, collate_fn=lambda x: tuple(zip(*x))
+        num_workers=CFG.WORKERS, pin_memory=True, persistent_workers=True, prefetch_factor=4, collate_fn=lambda x: tuple(zip(*x))
     )
     val_loader = DataLoader(
         val_ds, batch_size=1, shuffle=False,
@@ -1120,13 +1120,28 @@ def train():
     model.roi_heads.detections_per_img = 1000
     
     # lighter RPN/ROI for peak-mem & speed
-    if hasattr(model.rpn, "pre_nms_top_n"):
-        model.rpn.pre_nms_top_n  = {"training": 1000, "testing": 600}
-    if hasattr(model.rpn, "post_nms_top_n"):
-        model.rpn.post_nms_top_n = {"training": 500,  "testing": 300}
-    model.rpn.batch_size_per_image       = 256  # was 512
-    model.roi_heads.batch_size_per_image = 256  # was 512
-    model.roi_heads.detections_per_img   = 600  # was 1000
+    def set_rpn_topn(rpn, pre_train=1000, pre_test=600, post_train=500, post_test=300):
+        # torchvision <= 0.13 style
+        if hasattr(rpn, "pre_nms_top_n_train"):
+            rpn.pre_nms_top_n_train = pre_train
+            rpn.pre_nms_top_n_test  = pre_test
+        # torchvision >= 0.14 style (dict config)
+        elif hasattr(rpn, "pre_nms_top_n") and isinstance(rpn.pre_nms_top_n, dict):
+            rpn.pre_nms_top_n["training"] = pre_train
+            rpn.pre_nms_top_n["testing"]  = pre_test
+    
+        if hasattr(rpn, "post_nms_top_n_train"):
+            rpn.post_nms_top_n_train = post_train
+            rpn.post_nms_top_n_test  = post_test
+        elif hasattr(rpn, "post_nms_top_n") and isinstance(rpn.post_nms_top_n, dict):
+            rpn.post_nms_top_n["training"] = post_train
+            rpn.post_nms_top_n["testing"]  = post_test
+
+    set_rpn_topn(model.rpn)
+    
+    model.rpn.batch_size_per_image       = 256
+    model.roi_heads.batch_size_per_image = 256
+    model.roi_heads.detections_per_img   = 600
 
     # memory layout often speeds convs
     model = model.to(memory_format=torch.channels_last)
@@ -1142,7 +1157,7 @@ def train():
         max_iters=total_iters,
         min_lr=1e-5)
     
-    scaler = grad_scaler()
+    scaler = GradScaler()
     
     log_roi_embeddings(model, val_loader, writer, CFG.DEVICE, max_rois=400, tag="emb/roi", global_step=0)
     
@@ -1152,18 +1167,23 @@ def train():
         running = defaultdict(float)
 
         for i, (images, targets) in enumerate(train_loader, 0):
-            images  = [img.to(CFG.DEVICE, non_blocking=True).to(memory_format=torch.channels_last) for img in images]
+            images  = [img.to(CFG.DEVICE, non_blocking=True) for img in images]
             targets = [{k: v.to(CFG.DEVICE, non_blocking=True) for k, v in t.items()} for t in targets]
 
             optimizer.zero_grad(set_to_none=True)
-            with autocast():
+            
+            with autocast("cuda"):
                 loss_dict = model(images, targets)
                 loss = sum(loss for loss in loss_dict.values())
             
+            prev_scale = float(scaler.get_scale())
             scaler.scale(loss).backward()
-            scaler.step(optimizer)
+            scaler.step(optimizer)          # may be skipped by scaler on overflow
             scaler.update()
-            lr_scheduler.step()
+            did_step = float(scaler.get_scale()) >= prev_scale  # if overflow, scale decreased → no step
+    
+            if did_step:
+                lr_scheduler.step()
             
             # accumulate
             for k, v in loss_dict.items():
