@@ -120,13 +120,22 @@ def rename():
             path.rename(path.parent / new_name)
 
 def run_pipeline():
-    annotated_names = get_annotated_names()
-    move_annotated_images(annotated_names)
+    # 1. Fix and rename label files
     correct_combined_labels()
     rename_combined_to_og()
+
+    # 2. Get names of annotated stems
+    annotated_names = get_annotated_names()
+
+    # 3. Move annotated images
+    move_annotated_images(annotated_names)
+
+    # 4. Copy paired OG + RED images into training folder
     copy_annotated_images(annotated_names)
+
+    # 5. Cleanup: remove empty labels/images
     remove_empty_labels_and_images()
-    # rename()
+
 
 
 if __name__ == "__main__":
