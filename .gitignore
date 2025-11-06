@@ -1,15 +1,21 @@
+*.xml
+*.csv
 *.pth
 *.txt
 *.png
 *.jpg
-számolás/
-predictions/
 *.pyc
 *.npz
-runs/
-val_vis/
-.cache/
 .env
+
+old_junk/
+old_runs/
+build/
+dist/
+runs/
+.cache/
+predictions/
+számolás/
 
 # Byte-compiled / optimized / DLL files
 __pycache__/

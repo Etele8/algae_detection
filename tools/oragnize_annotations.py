@@ -22,7 +22,7 @@ ANNOTATED_FOLDER = DATA / "annotated"
 COLLECTED_IMAGES = DATA / "collected_images"
 RCNN_PATH = DATA / "r-cnn"
 RCNN_TRAINING_IMAGES = RCNN_PATH / "images"
-RCNN_LABELS = RCNN_PATH / "labels"
+RCNN_LABELS = RCNN_PATH / "xml_labels"
 
 
 def get_annotated_names():
@@ -38,7 +38,7 @@ def move_annotated_images(annotated_names):
     
     ANNOTATED_FOLDER.mkdir(exist_ok=True)
     for name in annotated_names:
-        img_name = name.replace("txt", "png")
+        img_name = name + "_combined.png"
         src = MERGED_PATH / img_name
         dst = ANNOTATED_FOLDER / img_name
         if src.exists():
@@ -59,10 +59,12 @@ def correct_combined_labels():
         new_lines = []
         for line in lines:
             parts = line.strip().split()
-            if len(parts) != 5:
-                continue
-            cls, x, y, w, h = map(float, parts)
-            new_lines.append(f"{int(cls)} {x*2:.6f} {y:.6f} {w*2:.6f} {h:.6f}")
+            if len(parts) == 5:
+                cls, x, y, w, h = map(float, parts)
+                new_lines.append(f"{int(cls)} {x*2:.6f} {y:.6f} {w*2:.6f} {h:.6f}")
+            else:
+                cls, x, y = map(float, parts)
+                new_lines.append(f"{int(cls)} {x*2:.6f} {y:.6f}")
 
         path.write_text("\n".join(new_lines))
 
@@ -82,7 +84,7 @@ def copy_annotated_images(annotated_names):
     
     RCNN_TRAINING_IMAGES.mkdir(parents=True, exist_ok=True)
     for name in annotated_names:
-        original = COLLECTED_IMAGES / f"{name}.png"
+        original = COLLECTED_IMAGES / f"{name}_og.png"
         red = COLLECTED_IMAGES / f"{name}_red.png"
 
         if original.exists():
