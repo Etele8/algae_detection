@@ -33,13 +33,10 @@ import torch.nn as nn
 
 torch.backends.cudnn.benchmark = True
 
-# =========================
-# Config
-# =========================
 @dataclass
 class Config:
-    IMAGE_DIR: Path = Path("/workspace/data/images")   # expects <stem>_og.png and <stem>_red.png
-    LABEL_DIR: Path = Path("/workspace/data/labels")   # expects <stem>_og.txt (YOLO: cls cx cy w h)
+    IMAGE_DIR: Path = Path("/workspace/data/images")
+    LABEL_DIR: Path = Path("/workspace/data/labels")
     CACHE_DIR: Path = Path("/workspace/data/cache_fused")
 
     IMAGE_SIZE: int = 2048
@@ -59,8 +56,7 @@ class Config:
     USE_ZSCORE: bool = False
     SAVE_BEST_TO: Path = Path("best_frcnn_6ch.pth")
 
-    # tensorboard
-    LOGDIR = "runs/algae12"
+    LOGDIR = "runs/algae"
     LOG_EVERY = 50
     PR_IOU = 0.5
     PR_SCORE_THRESH = 0.00
@@ -77,10 +73,10 @@ class Config:
     2: 3,  # FE
     4: 4,  # FC colony
     5: 5,  # FE colony
-    # 6 colony cell points -> ignore
-    # 3 (EUK_colony) -> removed
-    # 7 (artifact/crowd) -> ignore
-    8: 4, # too high overlap colonies
+    # 6 colony cell points
+    # 3 (EUK_colony)
+    # 7 (artifact/crowd)
+    8: 4,
     }
 
     SAVE_VAL_VIS_EVERY: int = 10
@@ -88,9 +84,6 @@ class Config:
 
 CFG = Config()
 
-# ====================
-# augmentations
-# ====================
 class ChannelDimming6(ImageOnlyTransform):
     def __init__(self, p=0.3, min_scale=0.3, max_scale=0.7):
         super().__init__(p=p)
@@ -147,9 +140,6 @@ def build_train_aug():
         min_visibility=0.30
     ))
 
-# =========================
-# helpers (matching, boxes, etc.)
-# =========================
 def _size_filter_xyxy(b: torch.Tensor, min_side=None, max_side=None):
     min_side = CFG.__dict__.get("MIN_SIDE_PX", 6) if min_side is None else min_side
     max_side = CFG.__dict__.get("MAX_SIDE_PX", 512) if max_side is None else max_side
@@ -273,60 +263,48 @@ def inject_se_after_layer2(backbone_body: nn.Module):
         return layer2.se_after(y)
     layer2.forward = new_forward
 
-# --- exact re-build of the old detector (torchvision 0.20.1) ---
 def build_old_frcnn_6ch_se(num_classes=7) -> FasterRCNN:
-    # 1) ResNet101-FPN; IMPORTANT: ask for 5 levels via LastLevelMaxPool
     backbone = resnet_fpn_backbone(
         backbone_name="resnet101",
-        weights="DEFAULT",                               # don't load the 3ch FPN weights here
+        weights="DEFAULT",                        
         returned_layers=[1,2,3,4],
         extra_blocks=LastLevelMaxPool()
     )
 
-    # 2) Replace conv1 by [ChannelMixer1x1(6) -> Conv2d(6->64,7x7)]
     old_conv = backbone.body.conv1
     mix = ChannelMixer1x1(in_ch=6)
     new_conv = nn.Conv2d(6, old_conv.out_channels, kernel_size=7, stride=2, padding=3, bias=False)
     with torch.no_grad():
-        # copy RGB weights to first 3 channels; average RGB into the extra 3
         new_conv.weight[:, :3] = old_conv.weight
-        mean_w = old_conv.weight.mean(dim=1, keepdim=True)  # (64,1,7,7)
+        mean_w = old_conv.weight.mean(dim=1, keepdim=True) 
         new_conv.weight[:, 3:] = mean_w.repeat(1, 3, 1, 1)
-    backbone.body.conv1 = nn.Sequential(mix, new_conv)   # keys like conv1.0.mix.*, conv1.1.*
+    backbone.body.conv1 = nn.Sequential(mix, new_conv)   
 
-    # 3) Inject SE after layer2
     inject_se_after_layer2(backbone.body)
 
-    # 4) RPN anchors → 9 anchors/location on each of the 5 FPN maps
-    #    (these sizes/ratios match your checkpoint heads: cls_logits out_channels=9, bbox_pred=36)
     sizes = (
-        (40, 56, 72),     # P2
-        (80, 96, 112),     # P3
-        (160, 192, 224),    # P4
-        (256, 384, 512),  # P5
-        (768, 1024, 1280),  # P6 (LastLevelMaxPool)
+        (40, 56, 72),     
+        (80, 96, 112),     
+        (160, 192, 224),    
+        (256, 384, 512),  
+        (768, 1024, 1280),
     )
     ratios = ((0.5, 1.0, 2.0),) * len(sizes)
     anchor_gen = AnchorGenerator(sizes=sizes, aspect_ratios=ratios)
 
-    # 5) ROI pool over the 5 maps (note 'pool' is the max-pooled level in torchvision)
     roi_pooler = MultiScaleRoIAlign(featmap_names=['0','1','2','3','pool'], output_size=7, sampling_ratio=2)
 
-    # 6) Build detector
     model = FasterRCNN(
         backbone=backbone,
         num_classes=num_classes,
         rpn_anchor_generator=anchor_gen,
         box_roi_pool=roi_pooler,
-        # sampler
         rpn_fg_iou_thresh=0.5, rpn_bg_iou_thresh=0.3,
         rpn_batch_size_per_image=512, rpn_positive_fraction=0.5,
         box_batch_size_per_image=512, box_positive_fraction=0.5,
-        # postproc defaults (you can override at inference)
         box_score_thresh=0.0, box_nms_thresh=0.5, box_detections_per_img=1000
     )
 
-    # 7) 6-channel transform (matches your fused cache)
     model.transform = GeneralizedRCNNTransform(
         min_size=[1600, 1800, 2048, 2300],
         max_size=4096,
@@ -335,7 +313,6 @@ def build_old_frcnn_6ch_se(num_classes=7) -> FasterRCNN:
     )
     return model
 
-# caching
 def build_cache_name(stem: str) -> Path:
     z = 1 if CFG.USE_ZSCORE else 0
     return CFG.CACHE_DIR / f"{stem}_sz{CFG.IMAGE_SIZE}_z{z}_lb1.npz"
@@ -359,7 +336,6 @@ def load_or_create_cached_fused(stem: str, im_dir: Path) -> Tuple[np.ndarray, Di
             **{k: np.float32(v) for k, v in meta.items()},
         )
 
-    # Try load cache
     if cache_path.exists():
         try:
             npz = np.load(cache_path, mmap_mode="r", allow_pickle=False)
@@ -382,16 +358,14 @@ def load_or_create_cached_fused(stem: str, im_dir: Path) -> Tuple[np.ndarray, Di
             try: cache_path.unlink()
             except OSError: pass
 
-    # --- read originals
-    og  = cv2.imread(str(ogp))   # BGR uint8
-    red = cv2.imread(str(redp))  # BGR uint8
+    og  = cv2.imread(str(ogp))
+    red = cv2.imread(str(redp))
     if og is None or red is None:
         raise FileNotFoundError(f"Read failed for {stem}")
 
     H0, W0 = og.shape[:2]
     target = CFG.IMAGE_SIZE
 
-    # --- 1) neutralize BR scalebar in ORIGINAL space (percent window)
     def neutralize_br(img_bgr_uint8: np.ndarray, br_w=0.15, br_h=0.05) -> np.ndarray:
         h, w = img_bgr_uint8.shape[:2]
         x0 = int(w * (1.0 - br_w)); y0 = int(h * (1.0 - br_h))
@@ -404,7 +378,6 @@ def load_or_create_cached_fused(stem: str, im_dir: Path) -> Tuple[np.ndarray, Di
     og  = neutralize_br(og.copy())
     red = neutralize_br(red.copy())
 
-    # --- resize + letterbox
     scale = min(target / max(1, W0), target / max(1, H0))
     new_w = int(round(W0 * scale))
     new_h = int(round(H0 * scale))
@@ -418,7 +391,6 @@ def load_or_create_cached_fused(stem: str, im_dir: Path) -> Tuple[np.ndarray, Di
     og_pad  = cv2.copyMakeBorder(og_rs,  pad_t, pad_b, pad_l, pad_r, cv2.BORDER_CONSTANT, value=0)
     red_pad = cv2.copyMakeBorder(red_rs, pad_t, pad_b, pad_l, pad_r, cv2.BORDER_CONSTANT, value=0)
 
-    # --- fuse to 6 channels
     fused_hw6 = np.concatenate([og_pad, red_pad], axis=-1).astype(np.float32)
     fused = np.transpose(fused_hw6, (2, 0, 1)).astype(np.float32)
 
@@ -431,7 +403,6 @@ def load_or_create_cached_fused(stem: str, im_dir: Path) -> Tuple[np.ndarray, Di
     _save_npz(fused, meta)
     return fused, meta
 
-# labels reading
 def read_yolo_remapped(stem: str, meta: Dict[str, float]) -> Tuple[List[List[float]], List[int]]:
 
     p = CFG.LABEL_DIR / f"{stem}_og.txt"
@@ -447,11 +418,9 @@ def read_yolo_remapped(stem: str, meta: Dict[str, float]) -> Tuple[List[List[flo
         if len(pr) == 3:
             c_raw, x, y = map(float, pr)
             
-            # denormalize to original pixels
             xo = x * W0
             yo = y * H0
             
-            # scale + pad into square cache space
             x1 = xo * s + dx
             y1 = yo * s + dy
         elif len(pr) == 5:
@@ -459,18 +428,16 @@ def read_yolo_remapped(stem: str, meta: Dict[str, float]) -> Tuple[List[List[flo
             if c_raw == 8:
                 c_raw = 4
 
-            # denormalize to original pixels
             x1o = (cx - bw/2.0) * W0
             y1o = (cy - bh/2.0) * H0
             x2o = (cx + bw/2.0) * W0
             y2o = (cy + bh/2.0) * H0
 
-            # scale + pad into square cache space
             x1 = x1o * s + dx; x2 = x2o * s + dx
             y1 = y1o * s + dy; y2 = y2o * s + dy
 
         if c_raw == 6:
-                points.append([x1, y1])  # colony cell point, ignore
+                points.append([x1, y1])
 
         elif x2 > x1 and y2 > y1:
             if c_raw == 7:
@@ -480,7 +447,6 @@ def read_yolo_remapped(stem: str, meta: Dict[str, float]) -> Tuple[List[List[flo
                 labs.append(CFG.RAW_TO_MODEL[c_raw])
     return bxs, labs, crowd_boxes, points
 
-# Dataset
 class PicoAlgaeDataset(Dataset):
     def __init__(self, stems:List[str], is_train:bool=False, aug=None, return_stem: bool = False):
         self.stems=list(stems)
@@ -546,11 +512,10 @@ class PicoAlgaeDataset(Dataset):
 
         target = {"boxes": boxes_t, "labels": labels_t, "crowd_boxes": crowd_t, "iscrowd": iscrowd}
         if self.return_stem:
-            target["stem"] = stem  # <- add it only when requested
+            target["stem"] = stem
         
         return image, target
 
-#filters
 def _area(b: torch.Tensor) -> torch.Tensor:
     return ((b[:, 2] - b[:, 0]).clamp_min(0) *
             (b[:, 3] - b[:, 1]).clamp_min(0))
@@ -560,7 +525,6 @@ def _centers(b: torch.Tensor) -> torch.Tensor:
                         (b[:, 1] + b[:, 3]) * 0.5], dim=1)
 
 def _iou_pair(a: torch.Tensor, b: torch.Tensor) -> torch.Tensor:
-    # a, b: (...,4) xyxy
     x1 = torch.maximum(a[..., 0], b[..., 0])
     y1 = torch.maximum(a[..., 1], b[..., 1])
     x2 = torch.minimum(a[..., 2], b[..., 2])
@@ -656,7 +620,6 @@ def parent_kill(
     if boxes.numel() == 0:
         return boxes, scores, labels
 
-    # sort small -> big so children are seen first
     areas = (boxes[:,2]-boxes[:,0]).clamp_min(0) * (boxes[:,3]-boxes[:,1]).clamp_min(0)
     order = torch.argsort(areas, descending=False)
     B, S, L = boxes[order], scores[order], labels[order]
@@ -668,10 +631,8 @@ def parent_kill(
         bi = B[i]; li = int(L[i].item())
         drop = False
         for k in keep:
-            # k is an already-kept (typically smaller) CHILD box
             bk = B[k]; lk = int(L[k].item())
 
-            # does candidate (bi) approximately contain child (bk)?
             contains = (
                 bk[0] >= bi[0] - tol_px and
                 bk[1] >= bi[1] - tol_px and
@@ -683,11 +644,10 @@ def parent_kill(
                 continue
 
             if lk in colony_set:
-                # colony child → can kill parent regardless of parent class
                 drop = True
                 break
             else:
-                # single-cell child → can only kill same-class parent
+
                 if li == lk:
                     drop = True
                     break
@@ -752,7 +712,6 @@ def drop_bright_green(hw6: np.ndarray,
 
         roi = hw6[y1:y2, x1:x2, :]
         stats = _roi_redorange_stats_og(roi)
-        # BOTH must hold to drop
         if (stats["bright_frac"] >= min_bright_frac) and (stats["ro_frac_on_bright"] < ro_min_frac):
             keep[i] = False
             print(f"stem: {stem}, bright_frac: {stats['bright_frac']:.4f}, ro_frac_on_bright: {stats['ro_frac_on_bright']:.4f}")
@@ -783,13 +742,13 @@ def suppress_cross_class_conflicts(
     scores: torch.Tensor,
     labels: torch.Tensor,
     *,
-    classes=(1, 2, 3),           # which classes to compare (EUK/FC/FE)
-    r_px=5,                      # center distance gate (pixels)
-    area_lo=0.8, area_hi=1.3,    # area ratio gate
-    iou_min=None,                # optional IoU gate (e.g., 0.4) or None
-    per_class_floor=None,        # e.g., {1:0.05, 2:0.15, 3:0.05}
-    margin=0.1,                  # winner must beat runner-up by 10
-    priority_order=(1, 3, 2),    # fallback preference (e.g., EUK > FE > FC)
+    classes=(1, 2, 3),
+    r_px=5,
+    area_lo=0.8, area_hi=1.3, 
+    iou_min=None,
+    per_class_floor=None,
+    margin=0.1,
+    priority_order=(1, 3, 2),
     return_debug=False
 ):
     """
@@ -822,23 +781,17 @@ def suppress_cross_class_conflicts(
     centers = _centers(b)
     areas = _area(b)
 
-    # Pairwise conflict graph (only across different labels)
     N = b.size(0)
     dsu = _DSU(N)
-    # Cheap spatial prefilter: sort by x center, only compare neighbors within r_px
     order = torch.argsort(centers[:, 0])
     cx_sorted = centers[order]
     for ii in range(N):
         i = order[ii].item()
-        # walk right while cx diff <= r_px
         jj = ii + 1
         while jj < N and (cx_sorted[jj, 0] - cx_sorted[ii, 0]) <= r_px:
             j = order[jj].item()
             if l[i] != l[j]:
-                # quick gates
-                # center distance
                 if torch.linalg.vector_norm(centers[i] - centers[j]) <= r_px:
-                    # area ratio
                     ai, aj = float(areas[i]), float(areas[j])
                     if ai > 0 and aj > 0:
                         ratio = ai / aj if ai > aj else aj / ai
@@ -851,13 +804,11 @@ def suppress_cross_class_conflicts(
                                 dsu.union(i, j)
             jj += 1
 
-    # Build clusters
     clusters = {}
     for i in range(N):
         r = dsu.find(i)
         clusters.setdefault(r, []).append(i)
 
-    # Decide winners
     keep_mask_local = torch.ones(N, dtype=torch.bool, device=dev)
     debug = []
     pr_rank = {int(c): k for k, c in enumerate(priority_order)}
@@ -865,9 +816,9 @@ def suppress_cross_class_conflicts(
 
     for comp in clusters.values():
         if len(comp) == 1:
-            continue  # no conflict
+            continue
 
-        # Scores normalized by per-class floors (or 1.0 if not provided)
+
         norm = []
         for i in comp:
             li = int(l[i].item())
@@ -876,7 +827,6 @@ def suppress_cross_class_conflicts(
             norm.append(float(s[i].item()) / floor)
         norm = torch.tensor(norm, device=b.device)
 
-        # Best vs second-best by normalized score
         order_local = torch.argsort(norm, descending=True)
         best_idx = comp[order_local[0].item()]
         winner_reason = "norm_score"
@@ -884,25 +834,19 @@ def suppress_cross_class_conflicts(
             best_val = float(norm[order_local[0]])
             second_val = float(norm[order_local[1]])
             if best_val < margin + second_val:
-                # within margin -> use priority order
-                # choose the class with highest priority present
                 cand = sorted(comp, key=lambda i: pr_rank.get(int(l[i].item()), 999))
                 best_idx = cand[0]
                 winner_reason = "priority_fallback"
 
-        # Final tiebreaks inside cluster for identical label & near-identical norm
         ties = [i for i in comp if int(l[i].item()) == int(l[best_idx].item())]
         if len(ties) > 1:
-            # pick highest raw score
             best_idx = max(ties, key=lambda i: float(s[i].item()))
-            # still a tie? pick smallest area
             best_score = float(s[best_idx].item())
             eq = [i for i in ties if abs(float(s[i].item()) - best_score) <= eps]
             if len(eq) > 1:
                 best_idx = min(eq, key=lambda i: float(areas[i].item()))
                 winner_reason = "area_tiebreak"
 
-        # Drop all others in the component
         for i in comp:
             if i != best_idx:
                 keep_mask_local[i] = False
@@ -917,7 +861,6 @@ def suppress_cross_class_conflicts(
                 "members_labels": [int(l[i].item()) for i in comp],
             })
 
-    # Lift local mask back to full set
     keep_global = torch.ones(boxes.size(0), dtype=torch.bool, device=dev)
     keep_global[idx] = keep_mask_local
 
@@ -926,10 +869,8 @@ def suppress_cross_class_conflicts(
         return (outB, outS, outL, debug)
     return (outB, outS, outL)
 
-# rpn settings
 def set_rpn_topn(rpn, pre_train=3000, pre_test=6000, post_train=3000, post_test=2000, nms_thresh=0.85, score_thresh=0.0):
     ok = False
-    # legacy attrs
     if hasattr(rpn, "pre_nms_top_n_train"):
         rpn.pre_nms_top_n_train = int(pre_train)
         rpn.pre_nms_top_n_test  = int(pre_test)
@@ -938,7 +879,7 @@ def set_rpn_topn(rpn, pre_train=3000, pre_test=6000, post_train=3000, post_test=
         rpn.post_nms_top_n_train = int(post_train)
         rpn.post_nms_top_n_test  = int(post_test)
         ok = True
-    # dict attrs
+
     if hasattr(rpn, "pre_nms_top_n") and isinstance(getattr(rpn, "pre_nms_top_n"), dict):
         rpn.pre_nms_top_n["training"] = int(pre_train)
         rpn.pre_nms_top_n["testing"]  = int(pre_test)
@@ -947,7 +888,7 @@ def set_rpn_topn(rpn, pre_train=3000, pre_test=6000, post_train=3000, post_test=
         rpn.post_nms_top_n["training"] = int(post_train)
         rpn.post_nms_top_n["testing"]  = int(post_test)
         ok = True
-    # TorchVision 0.19 private dicts
+
     if hasattr(rpn, "_pre_nms_top_n") and isinstance(getattr(rpn, "_pre_nms_top_n"), dict):
         rpn._pre_nms_top_n["training"] = int(pre_train)
         rpn._pre_nms_top_n["testing"]  = int(pre_test)
@@ -957,13 +898,11 @@ def set_rpn_topn(rpn, pre_train=3000, pre_test=6000, post_train=3000, post_test=
         rpn._post_nms_top_n["testing"]  = int(post_test)
         ok = True
 
-    # thresholds
     if hasattr(rpn, "nms_thresh"):
         rpn.nms_thresh = float(nms_thresh)
     if hasattr(rpn, "score_thresh"):
         rpn.score_thresh = float(score_thresh)
 
-    # Readback via accessors if available
     try:
         was_training = rpn.training
         rpn.train()
@@ -1006,11 +945,11 @@ def build_optimizer(model, base_lr_backbone=2e-3, lr_heads=1e-2, weight_decay=1e
         if not p.requires_grad:
             continue
         if "backbone.body.conv1" in n:
-            params_heads.append(p)  # 6-ch conv1
+            params_heads.append(p)
         elif n.startswith("backbone.body"):
             params_backbone.append(p)
         else:
-            params_heads.append(p)  # fpn, rpn, roi_heads
+            params_heads.append(p)
     return torch.optim.SGD(
         [
             {"params": params_backbone, "lr": base_lr_backbone},
@@ -1046,8 +985,8 @@ def _read_yolo_labels(stem: str):
         parts = ln.strip().split()
         if len(parts) != 5:
             continue
-        cls0 = int(float(parts[0]))       # YOLO 0-based
-        out.append(cls0 + 1)              # shift to 1..N
+        cls0 = int(float(parts[0]))
+        out.append(cls0 + 1)
     return out
     
 def stem_has_colony(stem: str) -> bool:
@@ -1066,7 +1005,7 @@ def evaluate_epoch(
     class_names: List[str],
     *,
     iou_thr: float = 0.50,
-    score_thr: float = 0.00,      # global floor if you want; per-class floor comes from CFG.CLASS_THR if set
+    score_thr: float = 0.00,
     device=CFG.DEVICE,
 ) -> float:
     """
@@ -1083,7 +1022,6 @@ def evaluate_epoch(
     singles = set(getattr(CFG, "SINGLE_CLASS_IDS", (1,2,3)))
     colonies = set(getattr(CFG, "COLONY_CLASS_IDS", (4,5)))
 
-    # accumulators
     per_cls = {c: {"tp": 0, "fp": 0, "fn": 0} for c in classes}
 
     for images, targets in val_loader:
@@ -1091,39 +1029,32 @@ def evaluate_epoch(
         outs = model(images)
 
         for img_t, out, tgt in zip(images, outs, targets):
-            # —— GTs
             gboxes  = tgt["boxes"].to(device)
             glabels = tgt["labels"].to(device)
             crowd   = tgt.get("crowd_boxes", None)
             crowd   = crowd.to(device) if (crowd is not None and crowd.numel() > 0) else None
 
-            # —— raw preds
             B = out["boxes"].to(device)
             S = out["scores"].to(device)
             L = out["labels"].to(device)
-            # Normalize EVERYTHING to CPU for post-proc & matching
+
             B, S, L = B.cpu(), S.cpu(), L.cpu()
             gboxes  = gboxes.cpu()
             glabels = glabels.cpu()
             crowd   = crowd.cpu() if crowd is not None else None
 
 
-            # Optional global floor (cheap pre-trim; we’ll still apply per-class floors below)
             if B.numel() and score_thr > 0:
                 m = S >= float(score_thr)
                 B, S, L = B[m], S[m], L[m]
 
-            # clip defensively
             if B.numel():
                 H, W = img_t.shape[-2], img_t.shape[-1]
                 B = clip_boxes_to_image(B, (H, W))
 
-            # —— build H×W×6 for color gate (your val images are fused 6ch in [0,1])
             
             hw6 = img_t.detach().permute(1,2,0).contiguous().float().cpu().numpy()
 
-            # —— exact postproc pipeline you’ve been using ————————
-            # per-class floors (fallback to CFG.SCORE_FLOOR)
             floor = float(getattr(CFG, "SCORE_FLOOR", 0.0))
             class_thr = getattr(CFG, "CLASS_THR", None)
             if B.numel():
@@ -1167,18 +1098,15 @@ def evaluate_epoch(
                     score_floor=0.1
                 )
             
-            stem = tgt.get("stem", "val")  # default if missing
-            # red/orange gate on singles (replace with drop_bright_green if that’s your latest)
+            stem = tgt.get("stem", "val")
             if B.numel() and getattr(CFG, "RO_ENABLE", True):
                 B,S,L = drop_bright_green(hw6, B, S, L, classes=(1,2,3), min_bright_frac=0.27, ro_min_frac=0.26, stem=stem)
 
-            # ignore preds overlapping any crowd box (IoU >= iou_thr)
             if (B.numel() > 0) and (crowd is not None) and (crowd.numel() > 0):
                 ious_c = box_iou_xyxy(B, crowd)
                 keep = (ious_c.max(dim=1).values < float(iou_thr))
                 B, S, L = B[keep], S[keep], L[keep]
 
-            # —— match & count (per class)
             for c in classes:
                 pm = (L == c)
                 gm = (glabels == c)
@@ -1194,7 +1122,6 @@ def evaluate_epoch(
                 per_cls[c]["fp"] += fp
                 per_cls[c]["fn"] += fn
 
-    # —— metrics
     def _prf1(tp, fp, fn):
         prec = tp / (tp + fp) if (tp + fp) > 0 else 0.0
         rec  = tp / (tp + fn) if (tp + fn) > 0 else 0.0
@@ -1270,15 +1197,12 @@ def train():
         num_classes=CFG.NUM_CLASSES
     ).to(CFG.DEVICE)
 
-    # RPN: loosen NMS, increase proposal budgets, zero score thresh
     set_rpn_topn(model.rpn, pre_train=3000, pre_test=6000, post_train=3000, post_test=3000, nms_thresh=0.85, score_thresh=0.0)
 
-    # ROI caps (Soft-NMS will handle overlaps)
     model.roi_heads.score_thresh = 0.0
     model.roi_heads.nms_thresh = 0.5
     model.roi_heads.detections_per_img = 1000
 
-    # Sampler batch sizes
     model.rpn.batch_size_per_image       = 256
     model.roi_heads.batch_size_per_image = 256
     
@@ -1320,19 +1244,14 @@ def train():
             for k, v in loss_dict.items():
                 running[k] += v.item()
 
-        # ----- validation -----
         mAp = evaluate_epoch(model, val_loader, epoch,
                              class_names=CFG.CLASS_NAMES, iou_thr=CFG.PR_IOU,
                              score_thr=CFG.PR_SCORE_THRESH, device=CFG.DEVICE)
 
-        # checkpoint on primary mAP (or all6 if you prefer)
         if not math.isnan(mAp) and mAp > best_map:
             best_map = mAp
             save_checkpoint(model, optimizer, lr_scheduler, epoch, best_map, CFG.SAVE_BEST_TO)
     print("Training done.")
 
-# =========================
-# Run
-# =========================
 if __name__ == "__main__":
     train()

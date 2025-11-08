@@ -149,3 +149,28 @@ def draw_vis(panel_bgr, boxes, scores, labels, palette: Dict[int,Tuple[int,int,i
             cv2.rectangle(panel_bgr, (x1, y1-th-6), (x1+tw+6, y1), col, -1)
             cv2.putText(panel_bgr, txt, (x1+3, y1-4), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0,0,0), 2, cv2.LINE_AA)
     return panel_bgr
+
+def density_gate_by_area(
+    B: torch.Tensor, S: torch.Tensor, L: torch.Tensor,
+    H: int, W: int,
+    score_min: float = 0.10,
+    single_labels=(1,2,3),
+    n_limit = 1200,
+):
+    """
+    Returns ('dense'|'sparse', debug_dict).
+    Considers only boxes with score >= score_min and label in single_labels.
+    """
+    if B.numel() == 0:
+        return "sparse", {"n": 0, "med_rel_area": None}
+
+    keep = (S >= score_min) & torch.isin(L, torch.tensor(single_labels, device=L.device))
+    if not keep.any():
+        return "sparse", {"n": 0, "med_rel_area": None}
+
+    Bb = B[keep].cpu().numpy()
+    areas = (Bb[:,2] - Bb[:,0]) * (Bb[:,3] - Bb[:,1])
+    n = int(len(areas))
+
+    is_dense = (n > n_limit)
+    return ("dense" if is_dense else "sparse"), {"n": n}

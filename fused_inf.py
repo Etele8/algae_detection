@@ -17,7 +17,8 @@ from tools.utils import (seed_everything,
     timer,
     iter_stems,
     compose_two_up,
-    draw_vis
+    draw_vis,
+    density_gate_by_area,
     )
 from tools.infer import infer_singles, infer_colonies
 from tools.filters import (
@@ -29,14 +30,14 @@ from tools.filters import (
 )
 
 PALETTE = {
-    1: (255,0,  0),   # EUK
-    2: (  0,255,255), # FC
-    3: ( 0,0, 255),   # FE
-    4: (128,128,128), # Colony A
-    5: (255,255,255), # Colony B
+    1: (255,0,  0),
+    2: (  0,255,255),
+    3: ( 0,0, 255),
+    4: (128,128,128),
+    5: (255,255,255),
 }
 
-# --- model checkpoints
+
 singles_path = Path("D:/intezet/Bogi/models/best_frcnn_6ch12_state.pth")
 colony_path  = Path("D:/intezet/Bogi/models/fold3_best_state.pth")
 density_path = Path("D:/intezet/Bogi/models/best_roi_count_state.pth")
@@ -50,18 +51,16 @@ seed_everything(42)
 
 @dataclass
 class FUSECFG:
-    IMAGE_DIR: Path = Path("data/test/Zanka_2024.04.14_3ml")
+    IMAGE_DIR: Path = Path("data/test/bigs")
     OUT_DIR:   Path = Path("infer_fused_out")
     VISUALS:   bool = True
 
-    # models
     COLONY_CKPT:  Path = colony_path
     SINGLE_CKPT:  Path = singles_path
-    OLD_WARP_SZ: int = 2080      # old (warp) single-cell model input size
-    LB_SIZE:     int = 2048      # new (letterboxed) colony model input size
+    OLD_WARP_SZ: int = 2080
+    LB_SIZE:     int = 2048
 
-    # unified class IDs
-    SINGLE_CLASS_IDS: Tuple[int,...] = (1,2,3)  # EUK, FC, FE
+    SINGLE_CLASS_IDS: Tuple[int,...] = (1,2,3)
     COLONY_CLASS_IDS: Tuple[int,...] = (4,5)
 
     SCORE_FLOOR: float = 0.10
@@ -81,30 +80,7 @@ gate = DenseGate(
 density_net, density_dev = load_density_model(density_path, DEVICE)
 
 
-# --- helpers to convert tensor dets <-> pipeline format
-# One detection = (x1,y1,x2,y2,score,label)
-def tensors_to_dets(B: torch.Tensor, S: torch.Tensor, L: torch.Tensor) -> list[tuple[float,float,float,float,float,int]]:
-    if B.numel() == 0:
-        return []
-    b = B.detach().cpu().numpy()
-    s = S.detach().cpu().numpy()
-    l = L.detach().cpu().numpy().astype(int)
-    return [(float(bi[0]), float(bi[1]), float(bi[2]), float(bi[3]), float(si), int(li)) for bi,si,li in zip(b,s,l)]
-
-def dets_to_tensors(dets: list[tuple[float,float,float,float,float,int]], device: torch.device):
-    if not dets:
-        B = torch.zeros((0,4), dtype=torch.float32, device=device)
-        S = torch.zeros((0,),   dtype=torch.float32, device=device)
-        L = torch.zeros((0,),   dtype=torch.int64,   device=device)
-        return B,S,L
-    arr = np.array(dets, dtype=np.float32)
-    B = torch.from_numpy(arr[:,0:4]).to(device)
-    S = torch.from_numpy(arr[:,4]).to(device)
-    L = torch.from_numpy(arr[:,5].astype(np.int64)).to(device)
-    return B,S,L
-
 def run():
-    # load models
     print("[load] new(letterbox colonies) + old(warp singles) ...")
     single_model = load_single_model(CFG.SINGLE_CKPT, DEVICE, CFG.OLD_WARP_SZ)
     colony_model = load_colony_model(CFG.COLONY_CKPT, DEVICE, min_size=CFG.LB_SIZE)
@@ -115,18 +91,15 @@ def run():
         og_path  = CFG.IMAGE_DIR / f"{stem}_og.png"
         red_path = CFG.IMAGE_DIR / f"{stem}_red.png"
 
-        # 1) letterbox fused + meta (for new model + visuals)
         fused_6chw, meta = letterbox(stem, CFG.IMAGE_DIR, target=CFG.LB_SIZE)
-        hw6_lb = fused_6chw.transpose(1,2,0).copy()  # H×W×6 float
+        hw6_lb = fused_6chw.transpose(1,2,0).copy()
         H, W = hw6_lb.shape[:2]
 
-        # 2) run both models
         with timer("colonies"):
             Bn, Sn, Ln = infer_colonies(colony_model, fused_6chw, DEVICE)
         with timer("singles"):
             Bo_lb, So, Lo = infer_singles(single_model, og_path, red_path, meta, CFG.OLD_WARP_SZ, DEVICE)
 
-        # 3) fuse (choose classes: singles from old, colonies from new)
         keep_old = torch.isin(Lo, torch.tensor(CFG.SINGLE_CLASS_IDS, device=Lo.device))
         keep_new = torch.isin(Ln, torch.tensor(CFG.COLONY_CLASS_IDS, device=Ln.device))
         B = torch.cat([Bo_lb[keep_old], Bn[keep_new]], 0)
@@ -135,17 +108,24 @@ def run():
 
         if B.numel():
             B, S, L = B.cpu(), S.cpu(), L.cpu()
+            
+        mode, dbg = density_gate_by_area(B, S, L, H=int(H), W=int(W), score_min=0.10)
+        print(f"[gate] {stem}: {mode} (n={dbg['n']}")
+        
+        class_thr = dict(CFG.CLASS_THR)
+        score_floor = CFG.SCORE_FLOOR
+        
+        if mode == "sparse":
+            score_floor = max(score_floor, 0.18)
+            class_thr[1] = max(class_thr.get(1, 0.0), 0.5)
+            class_thr[2] = max(class_thr.get(2, 0.0), 0.5)
+            class_thr[3] = max(class_thr.get(3, 0.0), 0.5)
 
-        # 4) per-class floors
         if B.numel():
-            floor = CFG.SCORE_FLOOR
-            if CFG.CLASS_THR:
-                per = torch.tensor([CFG.CLASS_THR.get(int(c), floor) for c in L], dtype=S.dtype)
-            else:
-                per = torch.full_like(S, floor)
+            per = torch.tensor([class_thr.get(int(c), score_floor) for c in L], dtype=S.dtype)
             m = S >= per
             B, S, L = B[m], S[m], L[m]
-
+    
         if B.numel():
             B, S, L = suppress_cross_class_conflicts(
                 B, S, L,
@@ -153,7 +133,7 @@ def run():
                 r_px=15.0,
                 area_lo=0.4,
                 area_hi=1.8,
-                iou_min=0.70,
+                iou_min=0.60,
                 per_class_floor=CFG.CLASS_THR,
                 margin=0.01,
                 priority_order=(1, 3, 2),
@@ -174,13 +154,13 @@ def run():
 
 
         if B.numel():
-            B, S, L = drop_bright_green(
-                hw6_lb, B, S, L,
-                classes=(1, 2,),
-                min_bright_frac=0.27,
-                ro_min_frac=0.26,
-                stem=stem,
-            )
+            # B, S, L = drop_bright_green(
+            #     hw6_lb, B, S, L,
+            #     classes=(1, 2,),
+            #     min_bright_frac=0.23,
+            #     ro_min_frac=0.29,
+            #     stem=stem,
+            # )
             B, S, L = drop_green_dominant_artifacts(
                 hw6_lb, B, S, L,
                 classes=(1,2,),
@@ -202,7 +182,6 @@ def run():
                 mode="center",
             )
 
-        # Counts (singles only) + flag
         euk = int((L == 1).sum().item())
         fc  = int((L == 2).sum().item())
         fe  = int((L == 3).sum().item())
@@ -228,9 +207,7 @@ def run():
         panel = compose_two_up(og.copy(), red.copy())
         panel = draw_vis(panel, B, S, L, PALETTE, draw_scores=True)
         for txt, color in lines:
-            # outline
             cv2.putText(panel, txt, (x0, y), font, scale, (0, 0, 0), thick + 2, cv2.LINE_AA)
-            # colored text
             cv2.putText(panel, txt, (x0, y), font, scale, color, thick, cv2.LINE_AA)
             y += line_h
         vis_dir = CFG.OUT_DIR / "vis"
@@ -240,7 +217,6 @@ def run():
         if i % 25 == 0:
             print(f"[{i}/{len(stems)}] done")
 
-    # 9) write CSV
     csv_path = CFG.OUT_DIR/"counts.csv"
     with csv_path.open("w", newline="") as f:
         w = csv.DictWriter(f, fieldnames=sorted(set().union(*[r.keys() for r in rows])))

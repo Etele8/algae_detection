@@ -7,9 +7,8 @@ from typing import Tuple
 from pathlib import Path
 
 TYPE_MAP = {
-    4: 0,  # FE_col
-    5: 1,  # FC_col
-    
+    4: 0,
+    5: 1,
 }
 
 def _og_gray_u8_from_roi(roi_hw6: np.ndarray) -> np.ndarray:
@@ -41,7 +40,6 @@ def roi_features_og(roi_hw6: np.ndarray, edge_rel_thr: float) -> np.ndarray:
     fill = _fill_ratio_otsu(gray, invert=False)
     lvar = _laplacian_var(gray)
     m = float(gray.mean()); s = float(gray.std())
-    # area_ratio not used at inference for gate (kept simple, consistent with saved model features)
     return np.array([ed, fill, lvar, 1.0, m, s], dtype=np.float32)
 
 class CountHead(nn.Module):
@@ -50,7 +48,6 @@ class CountHead(nn.Module):
         self.use_class_emb = use_class_emb and (num_types > 1)
         self.emb_dim = emb_dim if self.use_class_emb else 0
 
-        # Conv trunk (tiny UNet-ish encoder only)
         self.enc1 = nn.Sequential(
             nn.Conv2d(in_ch, base, 3, padding=1), nn.ReLU(inplace=True),
             nn.Conv2d(base, base, 3, padding=1), nn.ReLU(inplace=True),
@@ -66,55 +63,49 @@ class CountHead(nn.Module):
             nn.Conv2d(base*4, base*4, 3, padding=1), nn.ReLU(inplace=True),
         )
 
-        self.gap = nn.AdaptiveAvgPool2d(1)  # (B, C, 1, 1)
+        self.gap = nn.AdaptiveAvgPool2d(1)
 
-        in_feat = base*4 + self.emb_dim + 1  # + log(area_px)
+        in_feat = base*4 + self.emb_dim + 1
         if self.use_class_emb:
             self.class_emb = nn.Embedding(num_types, self.emb_dim)
 
-        # μ head
         self.mu = nn.Sequential(
             nn.Linear(in_feat, 256), nn.ReLU(inplace=True),
             nn.Linear(256, 1)
         )
-        # dispersion head r (>0)
         self.r = nn.Sequential(
             nn.Linear(in_feat, 128), nn.ReLU(inplace=True),
             nn.Linear(128, 1)
         )
 
-        # init
         for m in self.modules():
             if isinstance(m, nn.Conv2d):
                 nn.init.kaiming_normal_(m.weight, nonlinearity="relu"); nn.init.zeros_(m.bias)
             elif isinstance(m, nn.Linear):
                 nn.init.kaiming_normal_(m.weight, nonlinearity="relu"); nn.init.zeros_(m.bias)
 
-        # small positive bias to avoid μ≈0 at start
         with torch.no_grad():
-            self.mu[-1].bias.fill_(0.1)  # encourages μ≈Softplus(0.1) after activation
+            self.mu[-1].bias.fill_(0.1)
 
     def forward(self, x: torch.Tensor, type_idx: torch.Tensor, box_area_px: torch.Tensor):
-        # x: (B,6,S,S), type_idx: (B,), box_area_px: (B,)
         e1 = self.enc1(x)
         e2 = self.enc2(self.pool1(e1))
         e3 = self.enc3(self.pool2(e2))
-        z = self.gap(e3).flatten(1)  # (B, C)
+        z = self.gap(e3).flatten(1)
 
-        # features: [z, class_emb?, log_area]
         feats = [z]
         if self.use_class_emb:
-            ce = self.class_emb(type_idx)  # (B, emb_dim)
+            ce = self.class_emb(type_idx)
             feats.append(ce)
         log_area = torch.log1p(box_area_px).unsqueeze(1)
         feats.append(log_area)
 
         h = torch.cat(feats, dim=1)
 
-        # non-negative parameterizations
-        mu = F.softplus(self.mu(h)) + 1e-6      # (B,1)
-        r  = F.softplus(self.r(h)) + 1e-6       # (B,1)
-        return mu.squeeze(1), r.squeeze(1)      # (B,), (B,)
+
+        mu = F.softplus(self.mu(h)) + 1e-6
+        r  = F.softplus(self.r(h)) + 1e-6
+        return mu.squeeze(1), r.squeeze(1)
             
 def load_density_model(path, device) -> tuple[torch.nn.Module, torch.device]:
     device = torch.device(device)
@@ -140,9 +131,8 @@ class DenseGate:
             pack = np.load(str(npz_path), allow_pickle=True)
             self.mu  = pack["scaler_mean"]
             self.sd  = pack["scaler_scale"]
-            self.coef = pack["coef"]      # (1,D)
-            self.bias = pack["intercept"] # (1,)
-            # use EDGE_REL_THR from model’s config for consistent Scharr rel-threshold
+            self.coef = pack["coef"]     
+            self.bias = pack["intercept"]
             cfg = pack["config"].item() if isinstance(pack["config"], np.ndarray) else pack["config"]
             self.edge_thr = float(cfg.get("EDGE_REL_THR", self.edge_thr))
 
@@ -150,7 +140,7 @@ class DenseGate:
         """
         Returns: (is_dense, prob_dense, feats_dict)
         """
-        feats = roi_features_og(roi_hw6, self.edge_thr)  # [ed,fill,lvar,1,m,s]
+        feats = roi_features_og(roi_hw6, self.edge_thr)
         if self.mode == "lr":
             x = (feats - self.mu) / np.maximum(self.sd, 1e-6)
             z = float(x @ self.coef.reshape(-1) + self.bias.reshape(()))
@@ -179,22 +169,18 @@ def count_basic_method(roi_hw6: np.ndarray, cls_id: int,
     Hc, Wc, C = roi_hw6.shape
     assert C == 6, "ROI must be 6 channels (OG+RED)."
 
-    # Resize to the input size used by the ROI head during training
     S = 384
     roi_resized = cv2.resize(roi_hw6, (S, S), interpolation=cv2.INTER_LINEAR)
 
-    # Build tensors
-    x = torch.from_numpy(roi_resized.transpose(2, 0, 1)).unsqueeze(0).float().to(density_dev)   # (1,6,S,S)
-    # type index used by the ROI head (fallback to 0 if unseen)
-    type_idx = torch.tensor([TYPE_MAP.get(int(cls_id), 0)], dtype=torch.long, device=density_dev)  # (1,)
-    # use actual ROI area in cache-space pixels (helps calibration if your head used area)
-    box_area_px = torch.tensor([float(Hc * Wc)], dtype=torch.float32, device=density_dev)          # (1,)
+
+    x = torch.from_numpy(roi_resized.transpose(2, 0, 1)).unsqueeze(0).float().to(density_dev)   
+    type_idx = torch.tensor([TYPE_MAP.get(int(cls_id), 0)], dtype=torch.long, device=density_dev)  
+    box_area_px = torch.tensor([float(Hc * Wc)], dtype=torch.float32, device=density_dev)         
 
     with torch.no_grad():
-        mu, r = density_net(x, type_idx, box_area_px)   # mu: (1,), r: (1,)
+        mu, r = density_net(x, type_idx, box_area_px)  
         count_float = float(mu[0].item())
 
-    # If you need integers for downstream, round; for MAE reporting, prefer the float
     return int(round(max(0.0, count_float)))
 
  
@@ -217,7 +203,6 @@ def count_image(hw6_lb: np.ndarray, boxes, scores, labels, cfg: object, gate, de
             singles[c] += 1
             continue
 
-        # colonies
         colony_count += 1
 
     total = sum(singles.values()) + colony_count

@@ -81,7 +81,6 @@ def parent_kill(boxes, scores, labels, tol_px: float = 4.0):
     if boxes.numel() == 0:
         return boxes, scores, labels
 
-    # sort small -> big so children are kept first
     areas = (boxes[:,2]-boxes[:,0]).clamp_min(0) * (boxes[:,3]-boxes[:,1]).clamp_min(0)
     order = torch.argsort(areas, descending=False)
     B, S, L = boxes[order], scores[order], labels[order]
@@ -191,13 +190,13 @@ def suppress_cross_class_conflicts(
     scores: torch.Tensor,
     labels: torch.Tensor,
     *,
-    classes=(1, 2, 3),           # which classes to compare (EUK/FC/FE)
-    r_px=5,                      # center distance gate (pixels)
-    area_lo=0.8, area_hi=1.3,    # area ratio gate
-    iou_min=None,                # optional IoU gate (e.g., 0.4) or None
-    per_class_floor=None,        # e.g., {1:0.05, 2:0.15, 3:0.05}
-    margin=0.1,                  # winner must beat runner-up by 10
-    priority_order=(1, 3, 2),    # fallback preference (e.g., EUK > FE > FC)
+    classes=(1, 2, 3),       
+    r_px=5,                  
+    area_lo=0.8, area_hi=1.3,
+    iou_min=None,        
+    per_class_floor=None,
+    margin=0.1, 
+    priority_order=(1, 3, 2), 
     return_debug=False
 ):
     """
@@ -230,23 +229,17 @@ def suppress_cross_class_conflicts(
     centers = _centers(b)
     areas = _area(b)
 
-    # Pairwise conflict graph (only across different labels)
     N = b.size(0)
     dsu = _DSU(N)
-    # Cheap spatial prefilter: sort by x center, only compare neighbors within r_px
     order = torch.argsort(centers[:, 0])
     cx_sorted = centers[order]
     for ii in range(N):
         i = order[ii].item()
-        # walk right while cx diff <= r_px
         jj = ii + 1
         while jj < N and (cx_sorted[jj, 0] - cx_sorted[ii, 0]) <= r_px:
             j = order[jj].item()
             if l[i] != l[j]:
-                # quick gates
-                # center distance
                 if torch.linalg.vector_norm(centers[i] - centers[j]) <= r_px:
-                    # area ratio
                     ai, aj = float(areas[i]), float(areas[j])
                     if ai > 0 and aj > 0:
                         ratio = ai / aj if ai > aj else aj / ai
@@ -259,7 +252,6 @@ def suppress_cross_class_conflicts(
                                 dsu.union(i, j)
             jj += 1
 
-    # Build clusters
     clusters = {}
     for i in range(N):
         r = dsu.find(i)

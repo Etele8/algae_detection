@@ -3,7 +3,6 @@ import os, sys
 from pathlib import Path
 
 def _ensure_streams():
-    # Choose a per-user writable log location
     base = Path(os.getenv("LOCALAPPDATA") or Path.home() / ".algaecounter")
     log_dir = base / "AlgaeCounter" / "logs"
     log_dir.mkdir(parents=True, exist_ok=True)
@@ -21,12 +20,14 @@ import shutil
 import contextlib
 from dataclasses import dataclass, field
 from typing import Dict, Tuple, List
+from multiprocessing import freeze_support
+import traceback, datetime
+import re
 
 import numpy as np
 import cv2
 import torch
 
-# ----- Qt -----
 from PySide6.QtCore import Qt, QThread, Signal
 from PySide6.QtWidgets import (
     QApplication, QMainWindow, QWidget, QFileDialog, QMessageBox,
@@ -34,23 +35,19 @@ from PySide6.QtWidgets import (
     QCheckBox, QProgressBar
 )
 
-# Kill foreign Qt paths that poison the import (robust packaging)
 for var in ("QT_PLUGIN_PATH", "QT_QPA_PLATFORM_PLUGIN_PATH", "QT_API", "PYQTGRAPH_QT_LIB"):
     os.environ.pop(var, None)
 
-# Put PySide6 folder (with Qt6*.dll) first on PATH so the right DLLs load
 pyside_dir = Path(sys.executable).parent / "Lib" / "site-packages" / "PySide6"
 if pyside_dir.exists():
     os.environ["PATH"] = str(pyside_dir) + os.pathsep + os.environ.get("PATH", "")
 
-# Optional: prioritize this Python's DLLs
 dlls_dir = Path(sys.base_prefix) / "DLLs"
 if dlls_dir.exists():
     os.environ["PATH"] = str(dlls_dir) + os.pathsep + os.environ["PATH"]
 
-# ====== REUSED IMPORTS (no re-declarations) ======
 from tools.models import load_colony_model, load_single_model
-from tools.utils import seed_everything, letterbox, compose_two_up, draw_vis
+from tools.utils import seed_everything, letterbox, compose_two_up, draw_vis, density_gate_by_area
 from tools.infer import infer_singles, infer_colonies
 from tools.filters import (
     size_aware_softnms_per_class,
@@ -59,24 +56,23 @@ from tools.filters import (
     suppress_cross_class_conflicts,
     enforce_colony_rules,
     drop_green_dominant_artifacts,
+    
 )
 
-import numpy as _np, cv2 as _cv2, os as _os
-
-def _safe_imread(path, flags=_cv2.IMREAD_COLOR):
-    p = _os.fspath(path)
+def _safe_imread(path, flags=cv2.IMREAD_COLOR):
+    p = os.fspath(path)
     try:
         # np.fromfile handles Unicode paths on Windows
-        data = _np.fromfile(p, dtype=_np.uint8)
+        data = np.fromfile(p, dtype=np.uint8)
         if data.size == 0:
             return None
-        img = _cv2.imdecode(data, flags)
+        img = cv2.imdecode(data, flags)
         return img
     except Exception:
         return None
 
 # Monkey-patch globally so tools.utils.letterbox also benefits
-_cv2.imread = _safe_imread
+cv2.imread = _safe_imread
 
 PALETTE = {
     1: (255,   0,   0),
@@ -104,13 +100,10 @@ def resolve_data_path(rel: Path) -> Path:
 
 
 def APP_BASE() -> Path:
-    # When frozen by PyInstaller, files live under sys._MEIPASS
     if hasattr(sys, "_MEIPASS"):
         return Path(sys._MEIPASS)
     return Path(__file__).resolve().parent
 
-# ---- crash logger (very early) ----
-import traceback, datetime
 LOG_PATH = Path(os.getcwd()) / "algae_gui_error.log"
 
 def _excepthook(exc_type, exc, tb):
@@ -174,7 +167,6 @@ if torch.cuda.is_available():
 seed_everything(42)
 
 def _natural_key(p: Path):
-    import re
     s = p.stem
     return [int(t) if t.isdigit() else t.lower() for t in re.split(r'(\d+)', s)]
 
@@ -216,15 +208,13 @@ def process_pair(
     shutil.copy2(str(og_path), str(tmp_og))
     shutil.copy2(str(red_path), str(tmp_red))
 
-    # 1) letterbox fused + meta
     fused_6chw, meta = letterbox(stem, temp_pair_dir, target=CFG.LB_SIZE)
-    hw6_lb = fused_6chw.transpose(1, 2, 0).copy()  # HxWx6 float
+    hw6_lb = fused_6chw.transpose(1, 2, 0).copy()
+    H, W = hw6_lb.shape[:2]
 
-    # 2) run both models
-    Bn, Sn, Ln = infer_colonies(colony_model, fused_6chw, DEVICE)                 # LB
+    Bn, Sn, Ln = infer_colonies(colony_model, fused_6chw, DEVICE)
     Bo_lb, So, Lo = infer_singles(single_model, tmp_og, tmp_red, meta, CFG.OLD_WARP_SZ, DEVICE)
 
-    # 3) fuse (singles from old, colonies from new)
     keep_old = torch.isin(Lo, torch.tensor(CFG.SINGLE_CLASS_IDS))
     keep_new = torch.isin(Ln, torch.tensor(CFG.COLONY_CLASS_IDS))
     B = torch.cat([Bo_lb[keep_old], Bn[keep_new]], 0)
@@ -234,54 +224,58 @@ def process_pair(
     if B.numel():
         B, S, L = B.cpu(), S.cpu(), L.cpu()
 
-    # 4) per-class floors
+    mode, dbg = density_gate_by_area(B, S, L, H=int(H), W=int(W), score_min=0.10)
+    print(f"[gate] {stem}: {mode} (n={dbg['n']}")
+    
+    class_thr = dict(CFG.CLASS_THR)
+    score_floor = CFG.SCORE_FLOOR
+    
+    if mode == "sparse":
+        score_floor = max(score_floor, 0.18)
+        class_thr[1] = max(class_thr.get(1, 0.0), 0.5)
+        class_thr[2] = max(class_thr.get(2, 0.0), 0.5)
+        class_thr[3] = max(class_thr.get(3, 0.0), 0.5)
+
     if B.numel():
-        floor = CFG.SCORE_FLOOR
-        if CFG.CLASS_THR:
-            per = torch.tensor([CFG.CLASS_THR.get(int(c), floor) for c in L], dtype=S.dtype)
-        else:
-            per = torch.full_like(S, floor)
+        per = torch.tensor([class_thr.get(int(c), score_floor) for c in L], dtype=S.dtype)
         m = S >= per
         B, S, L = B[m], S[m], L[m]
 
-    # 5) cross-class conflict cleanup (EUK/FC/FE)
     if B.numel():
         B, S, L = suppress_cross_class_conflicts(
             B, S, L,
             classes=(1, 2, 3),
-            r_px=CFG.XCLS_R_PX,
-            area_lo=CFG.XCLS_AREA_LO,
-            area_hi=CFG.XCLS_AREA_HI,
-            iou_min=CFG.XCLS_IOU_MIN,
+            r_px=15.0,
+            area_lo=0.4,
+            area_hi=1.8,
+            iou_min=0.60,
             per_class_floor=CFG.CLASS_THR,
-            margin=CFG.XCLS_MARGIN,
-            priority_order=CFG.XCLS_PRIORITY,
+            margin=0.01,
+            priority_order=(1, 3, 2),
             return_debug=False,
         )
 
-    # 6) parent kill
     if B.numel():
         B, S, L = parent_kill(B, S, L, tol_px=4.0)
 
-    # 7) size-aware soft-NMS per class
     if B.numel():
         B, S, L = size_aware_softnms_per_class(
             B, S, L,
-            split_area_px=CFG.SPLIT_AREA_PX,
-            iou_small=CFG.SOFTNMS_IOU_SMALL, sigma_small=CFG.SOFTNMS_SIGMA_SMALL,
-            iou_big=CFG.SOFTNMS_IOU_BIG,     sigma_big=CFG.SOFTNMS_SIGMA_BIG,
+            split_area_px=70*70,
+            iou_small=0.6, sigma_small=0.05,
+            iou_big=0.6,    sigma_big=0.05,
             score_floor=CFG.SCORE_FLOOR,
         )
 
-    # 8) color gate on singles
-    if B.numel() and CFG.RO_ENABLE:
-        B, S, L = drop_bright_green(
-            hw6_lb, B, S, L,
-            classes=(1, 2,),
-            min_bright_frac=CFG.RO_MIN_BRIGHT,
-            ro_min_frac=CFG.RO_MIN_ROFRAC,
-            stem=stem,
-        )
+
+    if B.numel():
+        # B, S, L = drop_bright_green(
+        #     hw6_lb, B, S, L,
+        #     classes=(1, 2,),
+        #     min_bright_frac=0.23,
+        #     ro_min_frac=0.29,
+        #     stem=stem,
+        # )
         B, S, L = drop_green_dominant_artifacts(
             hw6_lb, B, S, L,
             classes=(1,2,),
@@ -294,8 +288,7 @@ def process_pair(
             exg_bg_min=0.04,
             stem=stem,
         )
-
-    # 9) enforce colony rules (4 kills 2s inside; 5 kills 3s inside)
+        
     if B.numel():
         B, S, L, _ = enforce_colony_rules(
             B, S, L,
@@ -304,13 +297,12 @@ def process_pair(
             mode="center",
         )
 
-    # Counts (singles only) + flag
+
     euk = int((L == 1).sum().item())
     fc  = int((L == 2).sum().item())
     fe  = int((L == 3).sum().item())
     flagged_colony = bool(((L == 4).any().item()) or ((L == 5).any().item()))
 
-    # Visuals (optional) -> <output>/vis/
     if save_visuals:
         og  = (hw6_lb[..., 0:3].clip(0, 1) * 255).astype(np.uint8)
         red = (hw6_lb[..., 3:6].clip(0, 1) * 255).astype(np.uint8)
@@ -326,13 +318,10 @@ def process_pair(
 
     return {"image": stem, "EUK": euk, "FC": fc, "FE": fe, "flagged_colony": flagged_colony}
 
-# ----------------------------
-# Worker Thread
-# ----------------------------
 class InferenceWorker(QThread):
-    progress = Signal(int, int, str)     # i, n, stem
+    progress = Signal(int, int, str)
     status   = Signal(str)
-    done     = Signal(str)               # csv path
+    done     = Signal(str)
     error    = Signal(str)
 
     def __init__(self, in_folder: Path, out_folder: Path, save_visuals: bool, parent=None):
@@ -345,7 +334,6 @@ class InferenceWorker(QThread):
 
     def run(self):
         try:
-            # Validate bundled models exist
             single_path = CFG.MODEL_DIR / CFG.SINGLE_FILENAME
             colony_path = CFG.MODEL_DIR / CFG.COLONY_FILENAME
             missing = []
@@ -387,8 +375,7 @@ class InferenceWorker(QThread):
                 )
                 rows.append(rec)
                 self.progress.emit(i, n, stem)
-
-            # CSV -> out_dir/counts.csv
+                
             csv_path = out_dir / "counts.csv"
             with csv_path.open("w", newline="") as f:
                 w = csv.DictWriter(f, fieldnames=["image", "EUK", "FC", "FE", "flagged_colony"])
@@ -403,16 +390,12 @@ class InferenceWorker(QThread):
         except Exception as e:
             self.error.emit(str(e))
 
-# ----------------------------
-# GUI
-# ----------------------------
 class MainWindow(QMainWindow):
     def __init__(self):
         super().__init__()
         self.setWindowTitle("Algae Inference")
         self.setMinimumSize(760, 240)
 
-        # Widgets
         self.in_edit = QLineEdit()
         self.in_browse = QPushButton("Browse…")
         self.out_edit = QLineEdit()
@@ -457,7 +440,6 @@ class MainWindow(QMainWindow):
         lay.addLayout(row6)
         self.setCentralWidget(root)
 
-        # Signals
         self.in_browse.clicked.connect(self._browse_in)
         self.out_browse.clicked.connect(self._browse_out)
         self.run_btn.clicked.connect(self._run)
@@ -495,7 +477,6 @@ class MainWindow(QMainWindow):
             QMessageBox.critical(self, "Error", "Please choose a valid **output** folder.")
             return
 
-        # Early check for bundled models to avoid silent fail
         single_path = CFG.MODEL_DIR / CFG.SINGLE_FILENAME
         colony_path = CFG.MODEL_DIR / CFG.COLONY_FILENAME
         if not (single_path.is_file() and colony_path.is_file()):
@@ -514,7 +495,7 @@ class MainWindow(QMainWindow):
         self.worker.error.connect(self._on_error)
 
         self.progress.setValue(0)
-        self.progress.setMaximum(0)  # busy
+        self.progress.setMaximum(0)
         self._set_busy(True)
         self.status_lbl.setText("Starting…")
         self.worker.start()
@@ -541,7 +522,6 @@ def main():
     os.environ.setdefault("QT_ENABLE_HIGHDPI_SCALING", "1")
     app = QApplication([])
     w = MainWindow()
-    # Helpful early warning if models are missing
     sp = CFG.MODEL_DIR / CFG.SINGLE_FILENAME
     cp = CFG.MODEL_DIR / CFG.COLONY_FILENAME
     if not (sp.is_file() and cp.is_file()):
@@ -554,7 +534,5 @@ def main():
     app.exec()
 
 if __name__ == "__main__":
-    # Windows-safe entry for PyInstaller
-    from multiprocessing import freeze_support
     freeze_support()
     main()
