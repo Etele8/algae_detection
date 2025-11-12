@@ -38,10 +38,10 @@ PALETTE = {
 }
 
 
-singles_path = Path("D:/intezet/Bogi/models/best_frcnn_6ch12_state.pth")
-colony_path  = Path("D:/intezet/Bogi/models/fold3_best_state.pth")
-density_path = Path("D:/intezet/Bogi/models/best_roi_count_state.pth")
-dense_gate_path = Path("D:/intezet/Bogi/models/gate_dense_lr.npz")
+singles_path = Path("models/best_frcnn_6ch12_state.pth")
+colony_path  = Path("models/fold3_best_state.pth")
+density_path = Path("models/best_roi_count_state.pth")
+dense_gate_path = Path("models/gate_dense_lr.npz")
 
 DEVICE = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 if torch.cuda.is_available():
@@ -51,7 +51,7 @@ seed_everything(42)
 
 @dataclass
 class FUSECFG:
-    IMAGE_DIR: Path = Path("data/test/bigs")
+    IMAGE_DIR: Path = Path("data/test")
     OUT_DIR:   Path = Path("infer_fused_out")
     VISUALS:   bool = True
 

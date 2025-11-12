@@ -62,7 +62,6 @@ from tools.filters import (
 def _safe_imread(path, flags=cv2.IMREAD_COLOR):
     p = os.fspath(path)
     try:
-        # np.fromfile handles Unicode paths on Windows
         data = np.fromfile(p, dtype=np.uint8)
         if data.size == 0:
             return None
@@ -71,7 +70,6 @@ def _safe_imread(path, flags=cv2.IMREAD_COLOR):
     except Exception:
         return None
 
-# Monkey-patch globally so tools.utils.letterbox also benefits
 cv2.imread = _safe_imread
 
 PALETTE = {
@@ -83,16 +81,13 @@ PALETTE = {
 }
 
 def resolve_data_path(rel: Path) -> Path:
-    # 1) onefile extracted location
     if hasattr(sys, "_MEIPASS"):
         p = Path(sys._MEIPASS) / rel
         if p.exists():
             return p
-    # 2) onedir (next to the executable)
     p = Path(sys.executable).parent / rel
     if p.exists():
         return p
-    # 3) running from source
     p = Path(__file__).resolve().parent / rel
     if p.exists():
         return p
@@ -122,11 +117,9 @@ def _excepthook(exc_type, exc, tb):
     sys.__excepthook__(exc_type, exc, tb)
 
 sys.excepthook = _excepthook
-# -----------------------------------
 
 @dataclass
 class FUSECFG:
-    # Hard-wired model locations inside the package (PyInstaller)
     MODEL_DIR: Path = APP_BASE() / "models"
     SINGLE_FILENAME: str = "best_frcnn_6ch12_state.pth"
     COLONY_FILENAME: str = "fold3_best_state.pth"
@@ -134,7 +127,7 @@ class FUSECFG:
     OLD_WARP_SZ: int = 2080
     LB_SIZE: int = 2048
 
-    SINGLE_CLASS_IDS: Tuple[int, ...] = (1, 2, 3)   # EUK, FC, FE
+    SINGLE_CLASS_IDS: Tuple[int, ...] = (1, 2, 3)
     COLONY_CLASS_IDS: Tuple[int, ...] = (4, 5)
 
     SCORE_FLOOR: float = 0.1
