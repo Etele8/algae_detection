@@ -33,14 +33,19 @@ embed:
   pooling: cls
 
 cluster:
-  reducer: umap                  # umap separates morphotypes better (install umap-learn)
-  pca_components: 50
+  reducer: umap                  # cluster in UMAP space (separates morphotypes far better)
+  pca_components: 50             # only used if umap is unavailable
   l2_normalize: true
+  umap:
+    n_components: 10             # cluster in this many UMAP dims (not 2-D)
+    n_neighbors: 15
+    min_dist: 0.0                # recommended when UMAP output feeds a clusterer
+    metric: cosine
   algorithm: hdbscan
   hdbscan:
-    min_cluster_size: 15
-    min_samples: null
-    metric: euclidean
+    min_cluster_size: 10         # raise if clusters merge distinct taxa; lower if too much noise
+    min_samples: 5               # lower than min_cluster_size = fewer noise points
+    metric: euclidean            # euclidean in the UMAP space
   kmeans:
     n_clusters: 12
 

@@ -1,9 +1,12 @@
 """Stage 4 - Clustering: group organism embeddings into morphotypes.
 
-HDBSCAN is the default because it finds clusters of varying density and, unlike
-k-means, does not force every object into a group - rare/odd organisms land in
-a noise bucket (label ``-1``) the researcher can inspect separately. A 2-D
-projection is also saved for the scatter plot in the review stage.
+DINOv2 embeddings are high-dimensional (384-1536d). Running a density-based
+clusterer directly on them - or on a plain PCA of them - tends to collapse
+everything into one "noise" blob, because distances concentrate in high
+dimensions. The robust, well-established recipe is to **reduce with UMAP first
+and cluster in that low-dimensional space**, where HDBSCAN finds clusters of
+varying density and routes rare/odd organisms to a noise bucket (label ``-1``).
+A separate 2-D UMAP is saved for the review scatter plot.
 """
 from __future__ import annotations
 
@@ -18,21 +21,41 @@ from sklearn.preprocessing import normalize
 from .config import Config
 
 
-def _reduce(x: np.ndarray, cfg: Config) -> tuple[np.ndarray, np.ndarray]:
-    """Return (features_for_clustering, coords_2d_for_plotting)."""
+def _features_and_coords(x: np.ndarray, cfg: Config) -> tuple[np.ndarray, np.ndarray]:
+    """Return (features_for_clustering, coords_2d_for_plotting).
+
+    With ``reducer: umap`` we cluster in a moderate-dim UMAP space (not 2-D,
+    which over-compresses) and plot in a separate 2-D UMAP. ``min_dist: 0`` is
+    the recommended setting when the UMAP output feeds a clusterer.
+    """
     c = cfg["cluster"]
-    n_comp = min(int(c["pca_components"]), x.shape[0], x.shape[1])
-    reduced = PCA(n_components=n_comp, random_state=cfg["seed"]).fit_transform(x)
+    seed = cfg["seed"]
 
     if c["reducer"] == "umap":
         try:
             import umap
-            coords = umap.UMAP(n_components=2, random_state=cfg["seed"]).fit_transform(x)
-            return reduced, coords
-        except Exception as exc:  # umap optional / may be unavailable on py3.13
-            print(f"[cluster] UMAP unavailable ({exc}); using 2-D PCA for plotting.")
-    coords = PCA(n_components=2, random_state=cfg["seed"]).fit_transform(x)
-    return reduced, coords
+
+            u = c.get("umap") or {}
+            n_components = int(u.get("n_components", 10))
+            n_neighbors = int(u.get("n_neighbors", 15))
+            min_dist = float(u.get("min_dist", 0.0))
+            metric = u.get("metric", "cosine")
+            feats = umap.UMAP(
+                n_components=n_components, n_neighbors=n_neighbors,
+                min_dist=min_dist, metric=metric, random_state=seed,
+            ).fit_transform(x)
+            coords = umap.UMAP(
+                n_components=2, n_neighbors=n_neighbors,
+                min_dist=min_dist, metric=metric, random_state=seed,
+            ).fit_transform(x)
+            return feats, coords
+        except Exception as exc:  # umap optional / may be unavailable
+            print(f"[cluster] UMAP unavailable ({exc}); falling back to PCA.")
+
+    n_comp = min(int(c["pca_components"]), x.shape[0], x.shape[1])
+    feats = PCA(n_components=n_comp, random_state=seed).fit_transform(x)
+    coords = PCA(n_components=2, random_state=seed).fit_transform(x)
+    return feats, coords
 
 
 def run_clustering(cfg: Config) -> Path:
@@ -44,7 +67,7 @@ def run_clustering(cfg: Config) -> Path:
     if c["l2_normalize"]:
         x = normalize(x)
 
-    features, coords = _reduce(x, cfg)
+    features, coords = _features_and_coords(x, cfg)
 
     if c["algorithm"] == "hdbscan":
         h = c["hdbscan"]

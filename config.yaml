@@ -39,14 +39,19 @@ embed:
   pooling: cls                   # cls | mean
 
 cluster:
-  reducer: pca                   # pca | umap (umap optional, needs umap-learn)
-  pca_components: 50             # reduce embedding dim before clustering
+  reducer: pca                   # pca | umap. GPU profile uses umap (clusters far better); pca here since umap-learn isn't in the local CPU deps
+  pca_components: 50             # only used if umap is unavailable
   l2_normalize: true             # normalize embeddings (cosine-like geometry)
+  umap:
+    n_components: 10             # cluster in this many UMAP dims (not 2-D)
+    n_neighbors: 15
+    min_dist: 0.0
+    metric: cosine
   algorithm: hdbscan             # hdbscan | kmeans
   hdbscan:
     min_cluster_size: 8
     min_samples: null            # null -> defaults to min_cluster_size
-    metric: euclidean            # on L2-normalized vectors ~= cosine
+    metric: euclidean            # euclidean in the UMAP space
   kmeans:
     n_clusters: 12
 
