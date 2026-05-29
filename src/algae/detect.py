@@ -136,7 +136,7 @@ class _ClassicalDetector:
 
 def load_detector(cfg: Config):
     backend = cfg["detect"]["backend"]
-    if backend in ("mobile_sam", "fastsam"):
+    if backend in ("mobile_sam", "sam2", "sam", "fastsam"):
         return _UltralyticsSAM(cfg)
     if backend == "classical":
         return _ClassicalDetector(cfg)
