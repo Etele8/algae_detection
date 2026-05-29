@@ -1,0 +1,14 @@
+# Keep the build context small and avoid baking local/CPU artifacts.
+.git
+.venv
+data
+outputs
+models
+*.pt
+*.pth
+__pycache__
+*.py[cod]
+*.egg-info
+.pytest_cache
+.ipynb_checkpoints
+outputs_smoke.log

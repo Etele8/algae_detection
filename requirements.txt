@@ -1,0 +1,21 @@
+# Core scientific stack
+numpy
+scipy
+pandas
+scikit-learn>=1.3        # provides built-in HDBSCAN
+Pillow
+opencv-python
+matplotlib
+tqdm
+PyYAML
+
+# Deep learning (CPU wheels by default on Windows PyPI)
+torch
+torchvision
+
+# Segmentation: "segment everything" backends (MobileSAM / FastSAM / SAM2)
+ultralytics
+
+# Embeddings: DINOv2 self-supervised features
+transformers
+safetensors

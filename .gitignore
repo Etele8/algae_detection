@@ -1,0 +1,24 @@
+# folders
+/data
+
+# virtual env
+/.venv
+
+# pipeline outputs (regenerated, can be large)
+/outputs
+
+# downloaded model weights
+/models
+*.pt
+*.pth
+
+# python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.ipynb_checkpoints/
+.pytest_cache/
+
+# os / editor
+.DS_Store
+Thumbs.db
