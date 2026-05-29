@@ -54,4 +54,11 @@ COPY . /opt/algae_detection
 # Sanity check at build time: GPU code path imports cleanly.
 RUN python -c "import torch, ultralytics, transformers, cv2, sklearn; print('image deps OK')"
 
-CMD ["bash"]
+# 5) RunPod entrypoint: keep the container alive (so the pod stays up) and
+#    enable key-based SSH. Kept as a late layer so rebuilds reuse the cached
+#    torch / deps / weights layers above and only push small new layers.
+RUN apt-get update && apt-get install -y --no-install-recommends openssh-server \
+    && rm -rf /var/lib/apt/lists/*
+COPY start.sh /start.sh
+RUN sed -i 's/\r$//' /start.sh && chmod +x /start.sh   # strip CR in case of CRLF
+CMD ["/start.sh"]

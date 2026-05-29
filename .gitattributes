@@ -1,0 +1,5 @@
+# Shell scripts and the Dockerfile must keep LF endings even when checked out
+# on Windows, otherwise Docker COPY bakes CRLF and `#!/usr/bin/env bash` breaks.
+*.sh        text eol=lf
+Dockerfile  text eol=lf
+*.yaml      text eol=lf
