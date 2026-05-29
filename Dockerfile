@@ -1,6 +1,6 @@
 # Batteries-included image for RunPod GPU pods.
-# CUDA + PyTorch + all Python deps + the SAM2-large and DINOv2-large weights are
-# baked in, so an activated pod is ready to run with NO setup step.
+# CUDA + PyTorch + all Python deps + the SAM2.1-large and DINOv2-giant weights
+# are baked in, so an activated pod is ready to run with NO setup step.
 #
 # Build & push (see README "Custom RunPod image"):
 #     docker build -t <user>/algae:gpu .
@@ -20,9 +20,12 @@ ENV DEBIAN_FRONTEND=noninteractive \
     TORCH_HOME=/opt/models/torch \
     YOLO_CONFIG_DIR=/opt/models/ultralytics
 
-# System deps. opencv-python-headless needs libglib2.0-0; git for cloning code.
+# System deps. ultralytics force-installs the GUI build of opencv, which links
+# libGL/libxcb at import time, so we install those runtime libs even though we
+# also keep the headless wheel. git is for cloning code on the pod.
 RUN apt-get update && apt-get install -y --no-install-recommends \
-        python3 python3-pip git ca-certificates libglib2.0-0 \
+        python3 python3-pip git ca-certificates \
+        libglib2.0-0 libgl1 libxcb1 libsm6 libxext6 libxrender1 \
     && ln -sf /usr/bin/python3 /usr/bin/python \
     && python -m pip install --upgrade pip \
     && rm -rf /var/lib/apt/lists/*
@@ -36,12 +39,12 @@ COPY requirements-gpu.txt /tmp/requirements-gpu.txt
 RUN pip install -r /tmp/requirements-gpu.txt
 
 # 3) Pre-download model weights INTO THE IMAGE (this is the whole point —
-#    no per-pod download). Names match config.gpu.yaml; change here + there
-#    together if you switch models (e.g. dinov2-giant / sam2.1_b.pt).
+#    no per-pod download). Strongest models: SAM2.1-large + DINOv2-giant.
+#    Names must match config.gpu.yaml; change both together if you switch.
 WORKDIR /opt/models
 RUN python -c "from transformers import AutoImageProcessor, AutoModel; \
-AutoImageProcessor.from_pretrained('facebook/dinov2-large'); \
-AutoModel.from_pretrained('facebook/dinov2-large')" \
+AutoImageProcessor.from_pretrained('facebook/dinov2-giant'); \
+AutoModel.from_pretrained('facebook/dinov2-giant')" \
  && python -c "from ultralytics import SAM; SAM('sam2.1_l.pt')"
 
 # 4) Project code (data/outputs/weights excluded via .dockerignore).

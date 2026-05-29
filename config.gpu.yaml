@@ -26,9 +26,9 @@ detect:
   ignore_corner_frac: [0.18, 0.10]
 
 embed:
-  model_name: facebook/dinov2-large   # 1024-d; use dinov2-giant (1536-d) for max quality
+  model_name: facebook/dinov2-giant   # 1536-d, strongest DINOv2 (baked into the image)
   device: auto
-  batch_size: 64                 # GPU can handle large batches
+  batch_size: 32                 # giant is heavier; raise if VRAM allows
   image_size: 224
   pooling: cls
 

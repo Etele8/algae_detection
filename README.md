@@ -41,7 +41,7 @@ profiles ship in the repo:
 | | Local CPU ([config.yaml](config.yaml)) | GPU / RunPod ([config.gpu.yaml](config.gpu.yaml)) |
 |--|--|--|
 | Detection | MobileSAM | **SAM2.1-large** |
-| Embedding | DINOv2-small (384-d) | **DINOv2-large** (1024-d) |
+| Embedding | DINOv2-small (384-d) | **DINOv2-giant** (1536-d) |
 | Speed | ~130 s/frame (segmentation) | seconds/frame |
 | Use for | code checks, small subsets | full, high-accuracy runs |
 
@@ -79,7 +79,7 @@ For real, high-quality runs use a GPU pod. The same code runs unchanged — only
 the config profile differs.
 
 1. **Create a pod** with a PyTorch GPU template (CUDA torch preinstalled). A
-   16–24 GB GPU (e.g. RTX A4000/4090) comfortably fits SAM2-large + DINOv2-large.
+   24 GB GPU (e.g. RTX 4090 / L4 / A5000) comfortably fits SAM2.1-large + DINOv2-giant.
 2. **Get the project + data onto the pod** (pick one):
    ```bash
    git clone <your-repo-url> /workspace/algae_detection      # code
@@ -101,16 +101,16 @@ the config profile differs.
 5. **Pull results back** (`outputs/` holds crops, clusters, contact sheets,
    `predictions.csv`) before stopping the pod.
 
-`config.gpu.yaml` selects SAM2.1-large, DINOv2-large, UMAP projection and
-larger batches. Lower `detect.weights` to `sam2.1_b.pt` or `embed.model_name`
-to `facebook/dinov2-base` if VRAM is tight; raise to `dinov2-giant` for maximum
-accuracy on a big GPU.
+`config.gpu.yaml` selects SAM2.1-large, DINOv2-giant, UMAP projection and
+batched inference. If VRAM is tight, lower `detect.weights` to `sam2.1_b.pt`
+and/or `embed.model_name` to `facebook/dinov2-large` (then update the Dockerfile
+pre-download names to match, or accept a one-time runtime download).
 
 ### Custom RunPod image (no per-pod setup)
 
 `bash setup_runpod.sh` works but reinstalls deps + re-downloads weights every
 time a fresh pod starts. To skip that entirely, build the [Dockerfile](Dockerfile)
-once — it bakes CUDA + torch + all deps **and** the SAM2-large / DINOv2-large
+once — it bakes CUDA + torch + all deps **and** the SAM2.1-large / DINOv2-giant
 weights into the image (under `/opt`, which RunPod's `/workspace` volume can't
 shadow). Then an activated pod is instantly ready.
 
@@ -119,7 +119,8 @@ shadow). Then an activated pod is instantly ready.
 ```bash
 docker build -t <user>/algae:gpu .
 docker push  <user>/algae:gpu
-# ~10 GB image (CUDA + torch + weights); building pulls the weights from the net.
+# ~14-15 GB image (CUDA + torch + DINOv2-giant + SAM2.1-large weights);
+# building pulls the weights from the net.
 ```
 
 **Use it on RunPod:** create a pod / template with **Container Image** =
@@ -137,8 +138,8 @@ so there are **no downloads at runtime**. If you change the models in
 `config.gpu.yaml`, update the pre-download names in the Dockerfile and rebuild
 (or accept a one-time download on first use).
 
-> Building a ~10 GB image on Windows is heavy but one-time. Alternatively build
-> it in CI (GitHub Actions) and push to your registry.
+> Building a ~14-15 GB image on Windows is heavy but one-time. Alternatively
+> build it in CI (GitHub Actions) and push to your registry.
 
 ## Scaling to the full dataset
 
