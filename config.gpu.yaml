@@ -40,6 +40,7 @@ cluster:
   reducer: umap                  # cluster in UMAP space (separates morphotypes far better)
   pca_components: 50             # only used if umap is unavailable
   l2_normalize: true
+  min_focus: 0                   # drop crops below this var-of-Laplacian before clustering (0 = off); cheap, reuses embeddings
   umap:
     n_components: 10             # cluster in this many UMAP dims (not 2-D)
     n_neighbors: 15

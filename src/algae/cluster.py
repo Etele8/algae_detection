@@ -64,6 +64,22 @@ def run_clustering(cfg: Config) -> Path:
     index = pd.read_csv(cfg.outputs_dir / "embeddings_index.csv")
     c = cfg["cluster"]
 
+    # Optional focus prune: exclude blurry/defocused crops from clustering
+    # without re-detecting/embedding (uses the focus column in objects.csv).
+    min_focus = float(c.get("min_focus") or 0.0)
+    if min_focus > 0:
+        obj = pd.read_csv(cfg.outputs_dir / "objects.csv")
+        if "focus" in obj.columns:
+            keep_ids = set(obj.loc[obj["focus"] >= min_focus, "object_id"])
+            keep = index["object_id"].isin(keep_ids).to_numpy()
+            print(f"[cluster] focus >= {min_focus}: kept {int(keep.sum())}, "
+                  f"dropped {int((~keep).sum())} blurry of {len(index)}")
+            x = x[keep]
+            index = index[keep].reset_index(drop=True)
+        else:
+            print("[cluster] cluster.min_focus set but objects.csv has no "
+                  "'focus' column (re-run detect to add it); skipping prune")
+
     if c["l2_normalize"]:
         x = normalize(x)
 
