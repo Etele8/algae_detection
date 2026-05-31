@@ -62,6 +62,17 @@ class _UltralyticsSAM:
             from ultralytics import SAM
             self.model = SAM(weights_arg)
 
+        # Automatic-mask-generation knobs (SAM/SAM2 "everything" mode). Only the
+        # keys present in config are forwarded, so ultralytics defaults stand
+        # otherwise. Higher conf_thres / stability_score_thresh reject low-quality
+        # (e.g. defocused) masks; points_stride controls grid density; crop_n_layers
+        # adds passes over image crops to catch smaller objects.
+        sam_cfg = (cfg["detect"].get("sam") or {})
+        allowed = ("conf_thres", "stability_score_thresh", "points_stride",
+                   "crop_n_layers", "crop_nms_thresh", "points_batch_size")
+        self.amg_kwargs = {k: sam_cfg[k] for k in allowed
+                           if k in sam_cfg and sam_cfg[k] is not None}
+
     def detect(self, image_bgr: np.ndarray) -> list[Detection]:
         h, w = image_bgr.shape[:2]
         results = self.model(
@@ -70,6 +81,7 @@ class _UltralyticsSAM:
             imgsz=self.imgsz,
             retina_masks=True,
             verbose=False,
+            **self.amg_kwargs,
         )
         out: list[Detection] = []
         if not results:
@@ -184,6 +196,7 @@ def run_detection(cfg: Config) -> Path:
     min_crop_px = int(d["min_crop_px"])
     pad = int(d["crop_padding"])
     corner_w, corner_h = d["ignore_corner_frac"]
+    min_focus = float(d.get("min_focus") or 0.0)   # 0 = disabled
 
     rows = []
     for _, row in tqdm(list(images.iterrows()), desc=f"detect[{d['backend']}]"):
@@ -192,6 +205,8 @@ def run_detection(cfg: Config) -> Path:
             continue
         h, w = image_bgr.shape[:2]
         img_area = h * w
+        # Laplacian once per frame; its variance inside a mask = focus measure.
+        lap = cv2.Laplacian(cv2.cvtColor(image_bgr, cv2.COLOR_BGR2GRAY), cv2.CV_64F)
         dets = detector.detect(image_bgr)
 
         kept = 0
@@ -206,6 +221,11 @@ def run_detection(cfg: Config) -> Path:
                 continue
             if _in_scalebar_corner(det, w, h, corner_w, corner_h):
                 continue
+            # Focus: defocused organisms have little high-frequency detail, so a
+            # low variance-of-Laplacian inside the mask flags them as blurry.
+            focus = float(lap[det.mask].var()) if area else 0.0
+            if focus < min_focus:
+                continue
             object_id = f"{row['image_id']}__{kept:03d}"
             raw_path = raw_dir / f"{object_id}.png"
             mask_path = mask_dir / f"{object_id}.png"
@@ -217,7 +237,7 @@ def run_detection(cfg: Config) -> Path:
                     "x0": det.bbox[0], "y0": det.bbox[1],
                     "x1": det.bbox[2], "y1": det.bbox[3],
                     "area_px": area, "area_frac": frac,
-                    "score": det.score,
+                    "score": det.score, "focus": focus,
                     "raw_path": str(raw_path),
                     "mask_path": str(mask_path),
                 }
