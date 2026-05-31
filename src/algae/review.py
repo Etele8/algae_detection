@@ -53,6 +53,10 @@ def run_review(cfg: Config) -> Path:
 
     sheets_dir = cfg.outputs_dir / "clusters"
     sheets_dir.mkdir(parents=True, exist_ok=True)
+    # Clear stale sheets from a previous run so the folder always matches the
+    # current clustering (cluster ids/counts change between runs while tuning).
+    for old in sheets_dir.glob("*.png"):
+        old.unlink()
 
     summary = []
     for cl, grp in df.groupby("cluster"):
