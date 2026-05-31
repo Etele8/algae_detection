@@ -1,0 +1,71 @@
+# ============================================================================
+# LOCAL CPU profile for tuning SEGMENTATION quickly.
+#   - MobileSAM (fast on CPU) as a proxy for SAM2-large: absolute masks differ,
+#     but the DIRECTION of every knob (CLAHE, points_stride, conf_thres,
+#     size/focus filters, imgsz) transfers to the GPU run.
+#   - Only a few frames, so the loop is seconds-to-minutes, not hours.
+#
+# Tuning loop:
+#   python run.py --config config.local.yaml detect
+#   python run.py --config config.local.yaml visualize
+#   # open outputs/overlays/*.png, tweak the knobs below, repeat
+# ============================================================================
+
+paths:
+  data_dir: data
+  outputs_dir: outputs
+  models_dir: models
+
+data:
+  drop_annotated_suffix: "_m"
+  image_glob: "*.png"
+
+detect:
+  backend: mobile_sam            # fast CPU proxy; switch to sam2 (slow on CPU) for a faithful check
+  weights: null
+  device: cpu
+  imgsz: 768                     # smaller = faster on CPU (GPU profile uses 1536); raise to mirror more closely
+  preprocess: clahe              # none | clahe — A/B this to see the contrast boost
+  max_images: 3                  # only the first few frames, for a quick loop
+  min_area_frac: 0.0004
+  max_area_frac: 0.45
+  min_crop_px: 24
+  crop_padding: 6
+  ignore_corner_frac: [0.18, 0.10]
+  min_focus: 0.0
+  sam:                           # mirrors config.gpu.yaml so tuning transfers
+    points_stride: 32            # grid density; raise (48/64) to catch thin/small objects (slower on CPU)
+    conf_thres: 0.80             # predicted-IoU floor; lower keeps faint masks
+    stability_score_thresh: 0.90 # lower keeps more, raise to cut flaky masks
+    crop_n_layers: 0             # 1 = extra pass on crops (catches small objects, slower)
+
+embed:
+  model_name: facebook/dinov2-small   # small/fast for the local subset
+  device: cpu
+  batch_size: 16
+  image_size: 224
+  pooling: cls
+
+cluster:
+  reducer: pca                   # umap-learn isn't in the local CPU deps
+  pca_components: 50
+  l2_normalize: true
+  min_focus: 0
+  umap: { n_components: 10, n_neighbors: 15, min_dist: 0.0, metric: cosine }
+  algorithm: hdbscan
+  hdbscan:
+    min_cluster_size: 4          # small, since the local subset has few objects
+    min_samples: null
+    metric: euclidean
+  kmeans:
+    n_clusters: 12
+
+review:
+  thumbs_per_cluster: 36
+  thumb_size: 128
+
+classify:
+  method: knn
+  knn_k: 15
+
+seed: 42
