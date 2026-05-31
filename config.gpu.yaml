@@ -51,9 +51,11 @@ cluster:
     metric: cosine
   algorithm: hdbscan
   hdbscan:
-    min_cluster_size: 10         # raise if clusters merge distinct taxa; lower if too much noise
+    min_cluster_size: 10         # lower (6/4) for more, finer groups; raise to merge
     min_samples: 5               # lower than min_cluster_size = fewer noise points
     metric: euclidean            # euclidean in the UMAP space
+    cluster_selection_method: eom   # eom (fewer, larger) | leaf (more, finer, homogeneous)
+    cluster_selection_epsilon: 0.0  # >0 merges nearby clusters; keep 0 for finer separation
   kmeans:
     n_clusters: 12
 

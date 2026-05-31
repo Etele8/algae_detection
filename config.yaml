@@ -54,6 +54,8 @@ cluster:
     min_cluster_size: 8
     min_samples: null            # null -> defaults to min_cluster_size
     metric: euclidean            # euclidean in the UMAP space
+    cluster_selection_method: eom   # eom (fewer, larger) | leaf (more, finer, homogeneous)
+    cluster_selection_epsilon: 0.0  # >0 merges nearby clusters; keep 0 for finer separation
   kmeans:
     n_clusters: 12
 

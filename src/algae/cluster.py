@@ -91,6 +91,11 @@ def run_clustering(cfg: Config) -> Path:
             min_cluster_size=int(h["min_cluster_size"]),
             min_samples=(None if h["min_samples"] is None else int(h["min_samples"])),
             metric=h["metric"],
+            # 'leaf' selects the fine leaf nodes of the hierarchy -> more, smaller,
+            # more homogeneous clusters (better separation than the default 'eom').
+            cluster_selection_method=h.get("cluster_selection_method", "eom"),
+            # >0 merges clusters whose distance is below this; 0 keeps them split.
+            cluster_selection_epsilon=float(h.get("cluster_selection_epsilon", 0.0)),
         ).fit_predict(features)
     elif c["algorithm"] == "kmeans":
         k = int(c["kmeans"]["n_clusters"])

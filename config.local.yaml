@@ -57,6 +57,8 @@ cluster:
     min_cluster_size: 4          # small, since the local subset has few objects
     min_samples: null
     metric: euclidean
+    cluster_selection_method: eom   # eom | leaf (leaf = more, finer, homogeneous groups)
+    cluster_selection_epsilon: 0.0
   kmeans:
     n_clusters: 12
 
