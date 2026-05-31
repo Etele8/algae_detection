@@ -124,14 +124,24 @@ docker push  <user>/algae:gpu
 ```
 
 **Use it on RunPod:** create a pod / template with **Container Image** =
-`<user>/algae:gpu`. On the pod, no install is needed — just get your code/data
-in place and run:
+`<user>/algae:gpu`. No install is needed. The image bakes a *copy* of the code
+at `/opt/algae_detection`, but that snapshot freezes at build time — so for the
+latest code, **clone the repo onto the persistent volume** and run from there
+(the baked deps + weights are reused via the image's `ALGAE_MODELS_DIR`/`HF_HOME`
+env, regardless of where the code lives):
 
 ```bash
-cd /opt/algae_detection           # code is baked in here
-ln -s /workspace/data data        # or copy your frames into ./data
+cd /workspace
+git clone https://github.com/<you>/algae_detection.git
+cd algae_detection
+echo "$ALGAE_MODELS_DIR"           # -> /opt/models (baked weights found here)
+ln -sfn /workspace/data data       # your frames on the persistent volume
+mkdir -p /workspace/outputs && ln -sfn /workspace/outputs outputs
 python run.py --config config.gpu.yaml unsupervised
 ```
+
+Update code later with `git pull` — no image rebuild needed. Rebuild the image
+only when deps or baked model weights change.
 
 Weights load from the image cache (`ALGAE_MODELS_DIR=/opt/models`, `HF_HOME`),
 so there are **no downloads at runtime**. If you change the models in
