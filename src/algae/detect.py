@@ -62,16 +62,12 @@ class _UltralyticsSAM:
             from ultralytics import SAM
             self.model = SAM(weights_arg)
 
-        # Automatic-mask-generation knobs (SAM/SAM2 "everything" mode). Only the
-        # keys present in config are forwarded, so ultralytics defaults stand
-        # otherwise. Higher conf_thres / stability_score_thresh reject low-quality
-        # (e.g. defocused) masks; points_stride controls grid density; crop_n_layers
-        # adds passes over image crops to catch smaller objects.
-        sam_cfg = (cfg["detect"].get("sam") or {})
-        allowed = ("conf_thres", "stability_score_thresh", "points_stride",
-                   "crop_n_layers", "crop_nms_thresh", "points_batch_size")
-        self.amg_kwargs = {k: sam_cfg[k] for k in allowed
-                           if k in sam_cfg and sam_cfg[k] is not None}
+        # NOTE: SAM automatic-mask-generation params (conf_thres,
+        # stability_score_thresh, points_stride, crop_n_layers) are NOT accepted
+        # by ultralytics' high-level model() call - get_cfg() rejects any kwarg
+        # outside the YOLO schema. Tuning them needs the lower-level
+        # SAMPredictor.generate() path. For now, junk/defocused masks are handled
+        # by the focus filter and size filters in run_detection().
 
     def detect(self, image_bgr: np.ndarray) -> list[Detection]:
         h, w = image_bgr.shape[:2]
@@ -81,7 +77,6 @@ class _UltralyticsSAM:
             imgsz=self.imgsz,
             retina_masks=True,
             verbose=False,
-            **self.amg_kwargs,
         )
         out: list[Detection] = []
         if not results:

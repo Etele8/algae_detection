@@ -30,7 +30,6 @@ detect:
   # ignore detections whose center falls inside this corner band.
   ignore_corner_frac: [0.18, 0.10]   # [width_frac, height_frac] of bottom-right
   min_focus: 0.0                 # drop blurry crops below this var-of-Laplacian (0 = off)
-  # sam: { conf_thres: 0.88, stability_score_thresh: 0.95, points_stride: 32 }  # SAM AMG knobs
 
 embed:
   model_name: facebook/dinov2-small   # dinov2-small (384d) | dinov2-base (768d)

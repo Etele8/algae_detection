@@ -25,11 +25,9 @@ detect:
   crop_padding: 6
   ignore_corner_frac: [0.18, 0.10]
   min_focus: 0.0                 # drop blurry/defocused crops below this var-of-Laplacian (0 = off)
-  sam:                           # SAM2 "segment everything" quality/density knobs
-    conf_thres: 0.88             # predicted-IoU floor; raise (0.92+) to reject low-quality masks
-    stability_score_thresh: 0.95 # mask stability floor; raise to cut flaky/defocused masks
-    points_stride: 32            # grid density; lower (16) = fewer/larger objects, higher = more
-    crop_n_layers: 0             # >0 adds passes on image crops to catch smaller objects
+  # NOTE: SAM automatic-mask-generation knobs (conf_thres, points_stride, …) are
+  # not settable via ultralytics' high-level API in this version; use min_focus
+  # and the size filters above to control what's kept.
 
 embed:
   model_name: facebook/dinov2-giant   # 1536-d, strongest DINOv2 (baked into the image)
