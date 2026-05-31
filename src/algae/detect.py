@@ -62,17 +62,46 @@ class _UltralyticsSAM:
             from ultralytics import SAM
             self.model = SAM(weights_arg)
 
-        # NOTE: SAM automatic-mask-generation params (conf_thres,
-        # stability_score_thresh, points_stride, crop_n_layers) are NOT accepted
-        # by ultralytics' high-level model() call - get_cfg() rejects any kwarg
-        # outside the YOLO schema. Tuning them needs the lower-level
-        # SAMPredictor.generate() path. For now, junk/defocused masks are handled
-        # by the focus filter and size filters in run_detection().
+        # Automatic-mask-generation knobs for SAM/SAM2 "segment everything".
+        # ultralytics' high-level model() call rejects these as cfg overrides, so
+        # we inject them by binding them onto the predictor's generate() (see
+        # _ensure_patched) while still letting ultralytics handle pre/post-proc.
+        sam_cfg = (cfg["detect"].get("sam") or {})
+        allowed = ("points_stride", "conf_thres", "stability_score_thresh",
+                   "stability_score_offset", "crop_n_layers", "crop_nms_thresh",
+                   "crop_overlap_ratio", "crop_downscale_factor", "points_batch_size")
+        self.amg_kwargs = {k: sam_cfg[k] for k in allowed
+                           if k in sam_cfg and sam_cfg[k] is not None}
+        self.preprocess = (cfg["detect"].get("preprocess") or "none")
+        self._patched = False
+
+    def _ensure_patched(self) -> None:
+        """Bind AMG params onto the predictor's generate() (one-time)."""
+        if self._patched or not self.amg_kwargs:
+            return
+        import functools
+        # Force predictor creation with the exact call args we use below, so the
+        # predictor is reused (and our patch persists) on real frames.
+        self.model(np.zeros((32, 32, 3), dtype=np.uint8), device=self.device,
+                   imgsz=self.imgsz, retina_masks=True, verbose=False)
+        pred = self.model.predictor
+        pred.generate = functools.partial(pred.generate, **self.amg_kwargs)
+        self._patched = True
+
+    @staticmethod
+    def _enhance(bgr: np.ndarray) -> np.ndarray:
+        """CLAHE on the L channel - lifts faint, low-contrast translucent cells."""
+        lab = cv2.cvtColor(bgr, cv2.COLOR_BGR2LAB)
+        l, a, b = cv2.split(lab)
+        l = cv2.createCLAHE(clipLimit=2.0, tileGridSize=(8, 8)).apply(l)
+        return cv2.cvtColor(cv2.merge((l, a, b)), cv2.COLOR_LAB2BGR)
 
     def detect(self, image_bgr: np.ndarray) -> list[Detection]:
+        self._ensure_patched()
         h, w = image_bgr.shape[:2]
+        sam_input = self._enhance(image_bgr) if self.preprocess == "clahe" else image_bgr
         results = self.model(
-            image_bgr[:, :, ::-1],  # ultralytics expects RGB
+            sam_input[:, :, ::-1],  # ultralytics expects RGB
             device=self.device,
             imgsz=self.imgsz,
             retina_masks=True,
