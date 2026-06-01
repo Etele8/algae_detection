@@ -17,20 +17,23 @@ detect:
   backend: sam2                  # SAM 2.1 — much cleaner masks than MobileSAM
   weights: sam2.1_l.pt           # large; drop to sam2.1_b.pt if VRAM-limited
   device: auto
-  imgsz: 1536                    # frames are 2048x1500; higher imgsz keeps thin-filament detail
-  preprocess: clahe              # none | clahe — boosts faint, low-contrast translucent organisms
+  imgsz: 1536                    # frames are 2048x1500; raise to 2048 for max detail if VRAM allows
+  preprocess: clahe              # boosts faint, low-contrast translucent organisms
   max_images: null
-  min_area_frac: 0.0004          # reject specks; raise to drop more small junk
-  max_area_frac: 0.45            # reject huge background blobs
-  min_crop_px: 24
+  # HIGH-RECALL post-filters: keep small cells (junk is handled later via a
+  # "discard" cluster). Lower min_area_frac/min_crop_px = fewer real cells lost.
+  min_area_frac: 0.0001          # ~17px blob on a 2048x1500 frame
+  max_area_frac: 0.45            # still reject whole-background blobs
+  min_crop_px: 14
   crop_padding: 6
   ignore_corner_frac: [0.18, 0.10]
-  min_focus: 0.0                 # drop blurry/defocused crops below this var-of-Laplacian (0 = off)
-  sam:                           # SAM2 "segment everything" knobs (denser + more permissive than defaults)
-    points_stride: 48            # grid density (default 32); higher catches thin/small objects
-    conf_thres: 0.80             # predicted-IoU floor (default 0.88); lower keeps faint masks
-    stability_score_thresh: 0.90 # mask-stability floor (default 0.95); lower keeps more
-    crop_n_layers: 0             # set 1 for an extra pass on image crops (catches small objects, ~2x slower)
+  min_focus: 0.0                 # keep blurry crops (recall first; discard later)
+  sam:                           # SAM2 "segment everything" tuned for RECALL (more masks, more junk)
+    points_stride: 64            # dense grid (default 32) -> catches small/thin objects between points
+    conf_thres: 0.62             # predicted-IoU floor (default 0.88); low = keep uncertain masks
+    stability_score_thresh: 0.85 # (default 0.95); low = keep flaky masks
+    crop_n_layers: 1             # extra pass on image crops -> big recall gain on small objects (slower)
+    crop_nms_thresh: 0.8         # less aggressive de-dup between crops -> keep more
 
 embed:
   model_name: facebook/dinov2-giant   # 1536-d, strongest DINOv2 (baked into the image)
